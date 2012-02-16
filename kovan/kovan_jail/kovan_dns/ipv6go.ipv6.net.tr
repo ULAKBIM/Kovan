@@ -1,0 +1,21 @@
+$ORIGIN ipv6go.ipv6.net.tr.     ; designates the start of this zone file in the name space
+$TTL 1h                         ; The default expiration time of a resource record without its own TTL value
+ipv6go.ipv6.net.tr. IN  SOA ns1.ipv6go.ipv6.net.tr. hostmaster.ipv6go.ipv6.net.tr. 2009082702 28800 7200 604800 600
+ipv6go.ipv6.net.tr. NS    ns1.ipv6go.ipv6.net.tr.
+ipv6go.ipv6.net.tr. MX    10 mail.ipv6go.ipv6.net.tr.
+ipv6go.ipv6.net.tr. AAAA  2001:a98:14:1::3
+www           	AAAA  2001:a98:14:1::3 
+mail          	AAAA  2001:a98:14:1::4
+ns1          	AAAA  2001:a98:14:1::2
+ftp          	AAAA  2001:a98:14:1::5
+
+bsd1.computerscience   	AAAA  2001:a98:14:2::3
+bsd2.computerscience   	AAAA  2001:a98:14:2::4
+bsd3.computerscience   	AAAA  2001:a98:14:2::5
+
+bsd4.management 	AAAA  2001:a98:14:3::3
+bsd5.management 	AAAA  2001:a98:14:3::4
+bsd6.management 	AAAA  2001:a98:14:3::5
+
+
+

@@ -1,0 +1,178 @@
+#!/usr/bin/perl
+use constant APPNAME  => "kvnGenQuaggaConf";
+use Getopt::Long;
+
+@interfaces;
+@neighbors;
+$distribute_static = 0;
+$zebra_conf = 0;
+$ripng_conf = 0;
+$rip_conf = 0;
+$output_path;
+my $content;
+    
+my $result = Getopt::Long::GetOptions(
+        "interfaces=s" => \@interfaces,
+        "neighbors=s" => \@neighbors,
+        "out=s" => \$output_path,
+        "distribute_static" => \$distribute_static,
+        "zebra" => \$zebra_conf,
+        "ripngd" => \$ripng_conf,
+        "ripd" => \$rip_conf,
+        );
+
+
+if( $ARGV[0] ){
+    print "!Unrecognized options\n";
+    foreach (@ARGV) {
+        print "$_\n";
+    }
+    exit;
+}
+
+if( !$zebra_conf && !$ripng_conf && !$rip_conf){
+    printf APPNAME.": you must use --zebra, --ripngd or --ripd \n";
+    &usage();
+    exit;
+}
+if( $zebra_conf && $distribute_static ){
+    printf APPNAME.": -d flag can not be used with zebra conf\n";
+    &usage();
+    exit;
+}
+
+if( $zebra_conf ){
+    $content = &create_zebra();
+}
+elsif( $ripng_conf ){
+    $content = &create_ripng();
+}
+elsif( $rip_conf ){
+    $content = &create_rip();
+}
+
+if( $output_path ){
+    open FILE, ">$output_path" or die $!;
+    print FILE $content;
+    close FILE;
+}
+else{
+    print $content;
+}
+
+sub create_zebra
+{
+    my $interface_block="";
+    my $content;
+    
+    foreach (@interfaces){
+        if( index($_, "-") > 0){
+            @fields = split(/-/,$_);
+            $interface_block .= "interface $fields[0]\n no ipv6 nd suppress-ra\n ipv6 nd prefix $fields[1]\n!\n";
+        }
+        else{
+            $interface_block .= "interface $_\n ipv6 nd suppress-ra\n!\n";
+        }
+    }
+    $interface_block .= "!";
+    
+    my $zebra_template = <<END;
+!
+! Zebra configuration saved from vty
+!   2010/02/18 08:43:16
+!
+hostname ROUTER
+password 8 bJWTy2ZvmGMzo
+enable password 8 bJWTy2ZvmGMzo
+service password-encryption
+!
+%s
+!
+interface lo0
+!
+ip forwarding
+ipv6 forwarding
+!
+!
+line vty
+!
+END
+    $content = sprintf( $zebra_template, $interface_block );
+    return $content;
+}
+
+sub create_ripng
+{
+    my $interface_block;
+    my $content;
+
+    if( $distribute_static ){
+        $interface_block .= " default-information originate\n";
+    }
+
+    foreach (@interfaces){
+        $interface_block .= " network $_\n";
+    }
+    $interface_block .= "!";
+
+    my $ripng_template = <<END;
+!
+! Zebra configuration saved from vty
+!   2010/02/18 08:43:16
+!
+hostname ripngd
+password 0601
+log stdout
+!
+router ripng
+%s
+!
+line vty
+!
+END
+
+    $content = sprintf($ripng_template, $interface_block);
+    return $content;
+}
+sub create_rip
+{
+    my $neighbors_block;
+    my $content;
+    
+    if( $distribute_static ){
+        $interface_block .= " default-information originate\n";
+    }
+    
+    foreach (@neighbors){
+        $neighbors_block .= " neighbor $_\n";
+    }
+    $neighbors_block .= " network 0.0.0.0/0\n";
+    $neighbors_block .= "!";
+
+    my $rip_template = <<END;
+!
+! Zebra configuration saved from vty
+!   2010/02/18 08:43:16
+!
+hostname ripd
+password 0601
+log stdout
+!
+router rip
+%s
+!
+line vty
+!
+END
+
+    $content = sprintf($rip_template, $neighbors_block);
+    return $content;
+}
+
+sub usage
+{
+    printf "usage:\t".APPNAME." --zebra -i interface [-i interface ...]\n";
+    printf "\t".APPNAME." --ripngd [-d] -i interface [-i interface ...]\n";
+    printf "\t".APPNAME." --ripd [-d] -n neighbor [-n neighbor ...]\n";
+}
+

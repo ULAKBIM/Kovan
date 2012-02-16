@@ -1,0 +1,14 @@
+$ORIGIN ulakbim.gov.tr.     ; designates the start of this zone file in the name space
+$TTL 1h                  ; The default expiration time of a resource record without its own TTL value
+ulakbim.gov.tr. IN  SOA ns1.ulakbim.gov.tr. hostmaster.ulakbim.gov.tr. 2009082702 28800 7200 604800 600
+ulakbim.gov.tr. NS    ns1.ulakbim.gov.tr.
+ulakbim.gov.tr. NS    ns2.ulakbim.gov.tr. 
+ulakbim.gov.tr. MX    10 mail.ulakbim.gov.tr.
+@             	MX    20 mail2.ulakbim.gov.tr.
+@             	MX    50 mail3.ulakbim.gov.tr.
+ulakbim.gov.tr. A     10.0.0.1
+ns            	A     10.0.0.2
+www           	CNAME ns.ulakbim.gov.tr.
+wwwtest       	CNAME www.ulakbim.gov.tr.
+mail          	A     10.0.0.3
+yavuz6         	AAAA  2001:a98:12::151 

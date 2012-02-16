@@ -1,0 +1,129 @@
+#!/usr/bin/perl -w
+
+use constant APPNAME  => "kovanMonitorServices";
+use YAML::Tiny;
+use Getopt::Long;
+
+my $conf_file;
+my $snmp;
+my $mail;
+my $execute;
+my $list;
+my $all;
+my $install;
+my $configure;
+my $kovan_dir;
+
+&read_args();
+
+# Create and read YAML file
+$yaml = YAML::Tiny->new;
+$yaml = YAML::Tiny->read($conf_file);
+$kovan_dir = $yaml->[0]->{kovan_dir};
+
+my @install_cmds= ("$kovan_dir/bin/kovanApachePhp -c $conf_file --install",
+                   "$kovan_dir/bin/kovanMrtg -c $conf_file --snmp $snmp --install",
+                   "$kovan_dir/bin/kovanNfsen -c $conf_file --install",
+                   "$kovan_dir/bin/kovanNagios -c $conf_file --snmp $snmp --mail $mail --install",
+                   "$kovan_dir/bin/kovanStats -c $conf_file --install"
+             );
+
+my @configure_cmds= ( "$kovan_dir/bin/kovanApachePhp -c $conf_file --configure",
+                      "$kovan_dir/bin/kovanMrtg -c $conf_file --snmp $snmp --configure",
+                      "$kovan_dir/bin/kovanNfsen -c $conf_file --configure",
+                      "$kovan_dir/bin/kovanNagios -c $conf_file --snmp $snmp --mail $mail --configure",
+                      "$kovan_dir/bin/kovanStats -c $conf_file --configure"
+             );
+
+my @execute_cmds=( "$kovan_dir/bin/kovanApachePhp -c $conf_file --execute",
+                   "$kovan_dir/bin/kovanMrtg -c $conf_file --snmp $snmp --execute",
+                   "$kovan_dir/bin/kovanNfsen -c $conf_file --execute",
+                   "$kovan_dir/bin/kovanNagios -c $conf_file --snmp $snmp --mail $mail --execute",
+                   "$kovan_dir/bin/kovanStats -c $conf_file --execute",
+                   "$kovan_dir/bin/kovanApachePhp -c $conf_file --execute"
+             ); 
+
+my $cleanup_file = $kovan_dir ."/topology.tmp";
+
+if( defined($execute) and ! -e $cleanup_file ){
+    print "Run KOVAN system before executing monitor servies\n";
+    exit(-1);
+}
+
+if( defined($install)){
+    &exec_print_cmds(\@install_cmds);
+}
+if( defined($configure)){
+    &exec_print_cmds(\@configure_cmds);
+}
+if( defined($execute)){
+    &exec_print_cmds(\@execute_cmds);
+}
+
+if( defined($all)){
+    &exec_print_cmds(\@install_cmds);
+    &exec_print_cmds(\@configure_cmds);
+    &exec_print_cmds(\@execute_cmds);
+}
+
+
+1;
+
+sub exec_print_cmds {
+
+    my $arr_ref = shift;
+    my $temp;
+
+    if( !defined($list) ){
+        foreach (@$arr_ref){
+            print "command: $_ ...";
+            system($_);
+            print "finished\n";
+        }
+    }
+    else{
+        foreach (@$arr_ref){
+            print "$_\n";
+        }
+    }
+}
+
+sub usage {
+    print "usage:\t".APPNAME." --conf conffile --snmp snmppasswd --mail adminmail [--list] [--install|--configure|--execute] [--all]\n";
+}
+
+sub read_args{
+
+    my $result = Getopt::Long::GetOptions(
+            "conf=s" => \$conf_file,
+            "snmp=s" => \$snmp,
+            "mail=s" => \$mail,
+            "list" => \$list,
+            "install" => \$install,
+            "configure" => \$configure,
+            "all" => \$all,
+            "execute" => \$execute
+            );
+
+    if( !defined($conf_file) || !defined($snmp) || !defined($mail)){
+        &usage();
+        exit -1;
+    }
+
+    if( defined($all) ) { 
+        if ( defined($install) || defined($configure) || defined($execute) ) {
+            print "If you use --all, you can't give one of the : --install, --configure or --execute !!";
+            &usage();
+            exit -1;
+            }
+    }
+
+    if ( defined($install) || defined($configure) || defined($execute) ) {
+        if( defined($all) ) {
+            print "If you use one of the --install, --configure or --execute, you can't use also --all !!";
+            &usage();
+            exit -1;
+        }
+    }
+
+}

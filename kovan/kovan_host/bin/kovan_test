@@ -1,0 +1,1087 @@
+#!/usr/bin/perl -w
+
+#
+# Usage:
+#   kovan --con conf_file --list
+#   kovan --con conf_file --execute
+#   kovan --con conf_file --remove --list
+#   kovan --con conf_file --remove --execute
+#
+#
+# Possible script call scenarios:
+#
+# 1. Calling on cleansystem, i.e no previous configuration running
+#
+#  1.1 kovan -c conf_file -l [valid]
+#      kovan --conf conf_file --list [valid]
+#      This call will print all created commands to screen, 
+#      one can use this command to check system setup before 
+#      running it. 
+#  
+#  1.2 kovan -c conf_file -e [valid]
+#      kovan --conf conf_file --execute [valid]
+#      This call will execute all created commands. All jails are 
+#      created, routing is configured and services are started via 
+#      this single call. A temporary file is created to be used 
+#      for destroying system. All created objects are written in
+#      on this temporary file.
+#
+#  1.3 kovan -c conf_file -r -l [invalid]
+#      kovan --conf conf_file --remove --list [invalid]
+#      Listing remove commands does not work on a clean system. There
+#      is no currently running configuration. 
+#
+#  1.4 kovan -c conf_file -r -e [invalid]
+#      kovan --conf conf_file --remove --execute [invalid]
+#      Executing delete commands does not work on a clean system. There
+#      is no currently running configuration. 
+#
+# 2. Calling on a system where currently a configuration running (if  
+#    cleanup.tmp file still exits, script decides that the previous  
+#    configuration did not removed).
+#
+#  2.1 kovan -c conf_file -l [valid]
+#      kovan --conf conf_file --list [valid]
+#      This call will print all created commands to screen, 
+#      one can use this command to check system setup before 
+#      running it.
+#  
+#  2.2 kovan -c conf_file -e [invalid]
+#      kovan --conf conf_file --execute [valid]
+#      This call will execute all created commands. This valid is invalid
+#      because previous configuration must be removed prior to this. 
+#
+#  2.3 kovan -c conf_file -r -l [valid]
+#      kovan --conf conf_file --remove --list [valid]
+#      Lists remove system commands 
+#
+#  2.4 kovan -c conf_file -r -e [invalid]
+#      kovan --conf conf_file --remove --execute [invalid]
+#      Executes remove system commands and removes cleanup.tmp file.
+#
+
+use constant APPNAME  => "kovan";
+use YAML::Tiny;
+use Getopt::Long;
+
+
+##########################
+my $IPv4 = "((25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))";
+my $G = "[0-9a-fA-F]{1,4}";
+
+my @tail = ( ":",
+	     "(:($G)?|$IPv4)",
+             ":($IPv4|$G(:$G)?|)",
+             "(:$IPv4|:$G(:$IPv4|(:$G){0,2})|:)",
+	     "((:$G){0,2}(:$IPv4|(:$G){1,2})|:)",
+	     "((:$G){0,3}(:$IPv4|(:$G){1,2})|:)",
+	     "((:$G){0,4}(:$IPv4|(:$G){1,2})|:)" );
+
+our $IPv6_re = $G;
+$IPv6_re = "$G:($IPv6_re|$_)" for @tail;
+$IPv6_re = qq/:(:$G){0,5}((:$G){1,2}|:$IPv4)|$IPv6_re/;
+$IPv6_re =~ s/\(/(?:/g;
+$IPv6_re = qr/$IPv6_re/;
+
+###########################
+my $h_nodes = {};
+
+my $yaml;
+my $is_monitor_exits;
+
+my $conf_file;				# configuration file contains virtual topology and
+                            # honeypot services information.
+
+my $execute_commands = 0;   # if 0 prints configuration, else executes
+my $list_commands = 0;      # if 0 prints configuration, else executes
+
+my $destroy = 0;            # if flag is set, current topology is destroyed. else
+                            # normal execution is done
+
+my $nfsen_start_port;       # start port of nfsen. When executing softflowd deamons in 
+                            # routers we have to decide to which port they log. This 
+                            # value is the lowest value for ports.
+
+my $current_nfsen_port;     # currently available not assigned nfsen port
+                            # this port is given to first router interface in the queue
+                            # and then it is incremented.
+
+my @jail_commands;			# holds jail related commands.
+my @network_cmds;			# holds virtual topology creation commands. 
+my @static_ipconfig;		# if static ip addresses are given in configuration file
+                            # they must be set manually. This structure holds static
+                            # ip configuration commands. 
+my @dynamic_ipconfig;
+my @sysctl_cmds;			# holds commands that set sysctl parameters with given values
+my @zebra_ripng_cmds;
+my @interface_up_cmds;
+my @default_route_cmds;
+my @service_cmds;			# holds all service start commands
+my @cleanup_cmds;
+my @link_cmds;
+my @kernel_cmds = ( "kldload ng_ether", "kldload ng_bridge", "kldload ng_eiface", "kldload ng_iface");
+
+&read_args();
+
+# Create and read YAML file
+$yaml = YAML::Tiny->new;
+$yaml = YAML::Tiny->read($conf_file);
+
+my $jail_roots = $yaml->[0]->{jail_roots};
+
+my $kovan_dir = $yaml->[0]->{kovan_dir};
+my $quagga_dir_host = $kovan_dir."/router/usr/local/etc/quagga";
+my $quagga_dir_jail = "/usr/local/etc/quagga"; 
+my $ether_intf =  $yaml->[0]->{physical_ether};
+
+my @ether_cmds = ( "ngctl msg $ether_intf: setpromisc 1", "ngctl msg $ether_intf: setautosrc 0" ); 
+
+my $cleanup_file = $kovan_dir ."/topology.tmp";
+
+
+if( $destroy == 1 )
+{
+    &destroy_system();
+    &exec_print_cmds(\@cleanup_cmds);
+}
+else
+{
+    if( -e $cleanup_file and $execute_commands==1){
+        print "! $cleanup_file exists\n";
+        print "Destroy previous configuration before establishing new one\n";
+        &usage();
+        exit(-1);
+    }
+
+    push( @cleanup_cmds, "touch $cleanup_file");
+    push( @cleanup_cmds, "echo \"config_file $conf_file\" \>> $cleanup_file");
+    &check_dependencies();
+    &create_devices();
+    &create_connections();
+    &configure_routing();
+    my @result_cmds = ( @kernel_cmds, @jail_create_cmds, @network_cmds, @static_ipconfig, 
+						@sysctl_cmds, @interface_up_cmds, @zebra_ripng_cmds, @default_route_cmds,
+						@dynamic_ipconfig, @ether_cmds, @link_cmds, @cleanup_cmds );
+
+    &exec_print_cmds(\@result_cmds);
+    &create_services();
+    &exec_print_cmds(\@service_cmds);
+}
+
+1;
+
+#===  FUNCTION  ================================================================
+#         NAME:  softflowd_service 
+#      PURPOSE:  start softflowd service in routers
+#   PARAMETERS:  path of softflowd command 
+#      RETURNS:  void 
+#  DESCRIPTION:  Method traverses all devices -except localhost- and start softflowd
+#				 service. In order to start softflowd service properly, method first
+#				 gets monitor device's IP address. Secondly, routers' each interface
+#				 has to log to a different port of monitor node. FÄor example, let
+# 				 nfs_start_port is 10000, first router's calls softflowd for its first
+#				 with port 10000, second interface with 10001 and so on. 
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub softflowd_service {
+    my $softflowd_path = shift;
+    my @interfaces;
+    my $dev;
+    my $obj;
+    my $interface;
+    my $command;
+    my $monitor_ip;
+    my $conn;
+    my $peer;
+    my @fields;
+
+    # below foreach code block is used for getting monitor host's IP addr
+    # traverse all devices to get the name of monitor host.
+    foreach $dev ( @{$yaml->[0]->{devices}})
+    {
+        if( $dev->{type} ne "monitor"){
+            next;
+        }
+        else{
+            # traverse connection to find a connection which contains
+            # monitor host as a peer.
+            foreach $con (@{$yaml->[0]->{connections}})
+            {
+                foreach $peer (@{$con->{peers}})
+                {
+                    if( $peer->{name} eq $dev->{name} )
+                    {
+                        # monitor host is found, get IP addr.
+                        foreach (@{$peer->{ip_addresses}}){
+                            if( $_ =~ m/($IPv6_re)/ ){
+                                $monitor_ip = $1;
+                            }
+                        }
+                        last;
+                    }
+                }
+
+                if( defined($monitor_ip)){
+                    last;
+                }
+            }
+            last;
+        }
+    }
+
+    foreach $dev ( @{$yaml->[0]->{devices}})
+    {
+        @interfaces = ();
+        if( $dev->{type} ne "router" or $dev->{name} eq "localhost"){
+            next;
+        }
+
+        # put all interfaces of router to an array. We need to somehow sort interfaces, thus
+        # we are using array to sort them.
+        foreach $obj (keys %{$h_nodes->{$dev->{name}}->{interfaces}} )
+        {
+		    push( @interfaces, $h_nodes->{$dev->{name}}->{interfaces}->{$obj}->{jail_alias});
+        }
+
+        # sort interface names.  
+        @interfaces = sort(@interfaces);
+
+        # for each interface create a softflowd command. Increase the value of current_nfsen_port at each
+        # iteration, so that no two router interfaces will log to same port of monitor host
+        foreach $interface (@interfaces){
+		    $command = "jexec $dev->{name} $softflowd_path -v 9 -i $interface -m 10 -n[$monitor_ip]:$current_nfsen_port";
+		    $current_nfsen_port++;
+		    push(@service_cmds, $command);
+        }
+    }
+
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  exec_print_cmds 
+#      PURPOSE:  executes commands or print them on STDOUT 
+#   PARAMETERS:  a reference to an array which holds commands 
+#      RETURNS:  none 
+#  DESCRIPTION:  if execute_commands flag is set execute commands else print all 
+#				 commands to STDOUT
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub exec_print_cmds {
+
+    my $arr_ref = shift;
+
+    if( $execute_commands ){
+        foreach (@$arr_ref){
+		    print "command: $_ ...";
+		    system($_);
+		    print "finished\n";
+        }
+    }
+    else{
+        foreach (@$arr_ref){
+            print "$_\n";
+        }
+    }
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  is_device 
+#      PURPOSE:  checks whether device exists in configuration file 
+#   PARAMETERS:  device name 
+#      RETURNS:  returns 1 if device exists 0 otherwise 
+#  DESCRIPTION:  Method traverses all devices and search given device 
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub is_device {
+    my $node = shift;
+    my $ret = 0;
+
+    foreach $dev ( @{$yaml->[0]->{devices}}){
+        if( $dev->{name} eq $node ){
+            $ret = 1;
+            last;
+        }
+    }
+
+    return $ret;
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  get_nodes 
+#      PURPOSE:  
+#   PARAMETERS:  
+#      RETURNS:  
+#  DESCRIPTION: 
+#       THROWS:
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub get_nodes {
+    my $node = shift;
+    my @nodes;
+
+    if( $node eq "all-devices" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( $node eq "all-routers" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{type} eq "router" and $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( $node eq "all-nodes" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{type} eq "node" and $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( &is_device($node)){
+        push( @nodes, $node);
+    }
+    else{
+    }
+
+    return @nodes;
+
+}
+#===  FUNCTION  ================================================================
+#         NAME:  create_services
+#      PURPOSE:  Creates run commands for all services defined in configuration file 
+#   PARAMETERS:  none
+#      RETURNS:  none 
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub create_services {
+    my $command;
+    my @nodes;
+    my $node;
+    my $ret;
+
+    if( ! $execute_commands ){
+        print "# It is normal to see \"jexec: jail \'xxx\' not found\" errors in this execution mode!\n";
+    }
+    
+    foreach $service ( @{$yaml->[0]->{services}}){
+        if( $service->{name} eq "softflowd" ){
+            if( $is_monitor_exits == 1 ){
+                &softflowd_service( $service->{command} );
+            }
+            else{
+                print "Softflowd service can not be created:\n";
+                print "	You must define a monitor host to use softflowd services in any device\n";
+            }
+            next;
+        }
+        
+        @nodes = &get_nodes($service->{node});
+        
+        foreach $node (@nodes){
+            $command = $service->{command};
+            while( $command =~ /{(.*?)}/g){
+                # calculate dynamic value directives given as {DIRECTIVE}
+                if( $1 eq "IP4" ){
+                    $temp = `jexec $node ifconfig | grep \'inet \'| grep -v 127.0.0.1 | awk \'{print \$2}\'`;
+                }
+                elsif( $1 eq "IP6" ){
+                    $temp = `jexec $node ifconfig | grep \'inet6 2001\' | head -n 1| awk \'{print \$2}\'`;
+                }
+                elsif( $1 eq "node-name" ){
+                    $temp = $node;
+                }
+                elsif( defined($yaml->[0]->{$1})){
+                    $temp = $yaml->[0]->{$1};
+                }
+                else
+                {
+                    print "Unknown keyword \"$1\" in command \"$command\"\n";
+                    print "Program terminated!\n";
+                    exit -1;
+                    
+                }
+                chomp($temp);
+                $command =~ s/{(.*?)}/$temp/;
+            }
+            push( @service_cmds, "jexec $node $command");
+        }
+    }
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  check_dependencies 
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub check_dependencies {
+
+    my $error_flag = 0;	
+    my $ret=`ifconfig -a| grep $ether_intf`;
+    
+    # check kovan directory
+    if (! -d $kovan_dir ){
+        print " - Kovan directory \'$kovan_dir\' does not exist!\n";
+        $error_flag = 1;
+    }
+    
+    if (! -d $quagga_dir_host ){
+        print " - Quagga Path(host) \'$quagga_dir_host\' does not exist!\n";
+        $error_flag = 1;
+    }
+    
+    if( $ret eq "" ){
+        print " - Physical real interface \'$ether_intf\' does not exist!\n";
+        $error_flag = 1;
+    }
+    
+    if( $error_flag == 1 ){
+        print " -- You have to set correct values to \'physical_ether\' and \'kovan_dir\' definitions\n";
+        print " -- in configuration file \'$conf_file\'\n";
+        print " -- Program terminates with no execution !\n";
+        exit -1;
+    }
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub usage {
+    print "usage:\t".APPNAME." --conf conf_file --list\n";
+    print "      \t".APPNAME." --conf conf_file --execute\n";
+    print "      \t".APPNAME." --conf conf_file --remove --list {destroys system}\n"; 
+    print "      \t".APPNAME." --conf conf_file --remove --execute {destroys system}\n"; 
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  destroy_system 
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub destroy_system {
+
+    my $line;
+    my $keyword;
+    my $value;
+    my $space_index;
+    
+    if( ! -e $cleanup_file ){
+        print "$cleanup_file does not exist\n";
+        exit(-1);
+    }
+    open ( FILE, $cleanup_file);
+    
+    while ($line = <FILE>) {
+        chomp($line);
+        if( $line eq ""){
+            next;
+        }
+    
+        $space_index = index( $line, " ");
+        $keyword = substr($line, 0, $space_index);
+        $value = substr($line, $space_index+1, length($line)-$space_index-1);
+        
+        if( $keyword eq "jail" and $value ne "localhost" ){
+            push( @cleanup_cmds, "jail -r $value");
+        }
+        elsif( $keyword eq "netgraph"){
+            push( @cleanup_cmds, "ngctl shutdown $value: \>/dev/null 2\>&1");
+        }
+        elsif( $keyword eq "ifcfg"){
+            push( @cleanup_cmds, "ifconfig $value destroy");
+        }
+        elsif( $keyword eq "localhost_route"){
+            push( @cleanup_cmds, "route delete $value");
+        }
+        elsif( $keyword eq "config_file"){
+        }
+    }
+    push( @cleanup_cmds, "rm -r $cleanup_file");
+    
+    close(FILE);
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  read_args
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub read_args{
+
+    my $conf_file_pointer;
+    
+    my $result = Getopt::Long::GetOptions(
+            "conf=s"  => \$conf_file,
+            "pointer=s"  => \$conf_file_pointer,
+            "execute" => \$execute_commands,
+            "list" => \$list_commands,
+            "remove" => \$destroy
+            );
+    
+    if( $ARGV[0] ){
+        printf(STDERR "Unrecognized options\n");
+        foreach (@ARGV) {
+            printf(STDERR "$_\n");
+        }
+        &usage();
+        exit -1;
+    }
+    
+    # Configuration is necessary in all cases.
+    if( !defined($conf_file) and !defined($ref_file) ){
+        printf(STDERR "Configuration file is not given\n");
+        &usage();
+        exit -1;
+    }
+    
+    if( defined($conf_file) and defined($ref_file) ){
+        printf(STDERR "Both configuration file and pointer file is given\n");
+        &usage();
+        exit -1;
+    }
+    
+    if( $list_commands == $execute_commands){
+        printf(STDERR "Use either --list or --execute\n");
+        &usage();
+        exit -1;
+    }
+    
+    if(defined($ref_file)){
+        open( FILE, $ref_file) || die("Could not open file!");
+        my @lines = <FILE>;
+        $conf_file = $lines[0];
+        chomp($conf_file);
+        $conf_file = "/usr/local/www/data/etc/" . $conf_file;
+    }
+    
+    
+    if( !(-e $conf_file) ){
+        printf(STDERR "$conf_file can not be found\n");
+        &usage();
+        exit -1;
+    }
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  create_devices
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub create_devices{
+    my $dev;
+    my $router_name;
+    my $client_name;
+    
+    push(@jail_create_cmds, "mount_nullfs -o ro /usr/jails/basejail  $jail_roots->{router}/basejail/");
+    push(@jail_create_cmds, "mount -t devfs devfs $jail_roots->{router}/dev/");
+    
+    push(@jail_create_cmds, "mount_nullfs -o ro /usr/jails/basejail  $jail_roots->{node}/basejail/");
+    push(@jail_create_cmds, "mount -t devfs devfs $jail_roots->{node}/dev/");
+    
+    push(@jail_create_cmds, "mount_nullfs -o ro /usr/jails/basejail  $jail_roots->{monitor}/basejail/");
+    push(@jail_create_cmds, "mount -t devfs devfs $jail_roots->{monitor}/dev/");
+    
+    $is_monitor_exits = 0;
+
+    foreach $dev ( @{$yaml->[0]->{devices}}){
+        if( $dev->{name} eq "localhost" )
+        {
+            if(defined($dev->{default_route})){
+                foreach (@{$dev->{default_route}}){
+                    push( @default_route_cmds, "route add $_");
+                    push( @cleanup_cmds, "echo \"localhost_route $_\" \>> $cleanup_file");
+                }
+            }
+        }
+        elsif( $dev->{type} eq "router"){
+            # get router name
+            $router_name = $dev->{name};
+            
+            # write jail_create commands for this jail
+            push( @jail_create_cmds, "jail -c vnet name=$router_name host.hostname=$router_name path=$jail_roots->{router} allow.raw_sockets  persist");
+            
+            $h_nodes->{$router_name}->{interfaces} = ();
+            $h_nodes->{$router_name}->{isrouter} = 1;
+            
+            $h_nodes->{$router_name}->{distribute} = $dev->{distribute};
+            
+            # if has a default route add configuration command for route
+            if( defined($dev->{default_route})){
+                foreach (@{$dev->{default_route}}){
+                    push( @default_route_cmds, "jexec $router_name route add $_");
+                }
+            }
+            
+            # add sysctl configuration parameters
+            push( @sysctl_cmds, "jexec $router_name sysctl -w net.inet6.ip6.accept_rtadv=0");
+            push( @sysctl_cmds, "jexec $router_name sysctl -w net.inet6.ip6.forwarding=1");
+            push( @sysctl_cmds, "jexec $router_name sysctl -w net.inet.ip.forwarding=1");
+            
+            push( @network_cmds, "jexec $router_name ifconfig lo0 localhost");
+        }
+        elsif( $dev->{type} eq "node"){
+            $client_name = $dev->{name};
+            push( @jail_create_cmds, "jail -c vnet name=$client_name host.hostname=$client_name path=$jail_roots->{node} persist");
+            $h_nodes->{$client_name}->{interfaces} = ();
+            $h_nodes->{$client_name}->{isrouter} = 0;
+            
+            # if has a default route add configuration command for route
+            if( defined($dev->{default_route})){
+                foreach (@{$dev->{default_route}}){
+                    push( @default_route_cmds, "jexec $client_name route add $_");
+                }
+            }
+            
+            # add sysctl configuration parameters
+            push( @sysctl_cmds, "jexec $client_name sysctl -w net.inet6.ip6.accept_rtadv=1");
+            push( @sysctl_cmds, "jexec $client_name sysctl -w net.inet6.ip6.forwarding=0");
+            
+            push( @network_cmds, "jexec $client_name ifconfig lo0 localhost");
+        }
+        elsif( $dev->{type} eq "monitor"){
+            $is_monitor_exits = 1;
+            $client_name = $dev->{name};
+            push( @jail_create_cmds, "jail -c vnet name=$client_name host.hostname=$client_name path=$jail_roots->{monitor}  allow.sysvipc allow.raw_sockets  persist");
+            $h_nodes->{$client_name}->{interfaces} = ();
+            $h_nodes->{$client_name}->{isrouter} = 0;
+            
+            # if has a default route add configuration command for route
+            if( defined($dev->{default_route})){
+           	    foreach (@{$dev->{default_route}}){
+                    push( @default_route_cmds, "jexec $client_name route add $_");
+                }
+            }
+            
+            # add sysctl configuration parameters
+            push( @sysctl_cmds, "jexec $client_name sysctl -w net.inet6.ip6.accept_rtadv=1");
+            push( @sysctl_cmds, "jexec $client_name sysctl -w net.inet6.ip6.forwarding=1");
+            
+            push( @network_cmds, "jexec $client_name ifconfig lo0 localhost");
+            
+            $nfsen_start_port = $dev->{nfsen_start_port};
+            $current_nfsen_port = $nfsen_start_port;
+        }
+        push( @cleanup_cmds, "echo \"jail $dev->{name}\" \>> $cleanup_file");
+    }
+}
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  connect_localhost
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+
+sub connect_localhost{
+    my ($peer1, $peer2) = @_;
+    my ($peer, $host);
+
+    if( $peer1->{name} eq "localhost"){
+        $peer = $peer2;
+        $host = $peer1;
+    }
+    else{
+        $peer = $peer1;
+        $host = $peer2;
+    }
+	
+    my $size = scalar(keys %{$h_nodes->{$peer->{name}}->{interfaces}});
+    my $eth_obj = "eth".$size;
+
+    push( @network_cmds, "ifconfig bridge create");
+    push( @network_cmds, "ifconfig epair create");
+    push( @network_cmds, "ifconfig bridge0 addm epair0a");
+    foreach( @{$peer->{b_ip_address}}){
+        push( @network_cmds, "ifconfig epair0a $_");
+    }
+
+    push( @network_cmds, "ifconfig epair0b vnet $peer->{name}");
+    foreach( @{$peer->{n_ip_address}}){
+        push( @network_cmds, "jexec $peer->{name} ifconfig epair0b $_");
+    }
+    push( @network_cmds, "jexec $peer->{name} ifconfig epair0b name $eth_obj");
+    push( @interface_up_cmds, "jexec $peer->{name} ifconfig $eth_obj up");
+    push( @interface_up_cmds, "ifconfig epair0a up");
+    push( @interface_up_cmds, "ifconfig bridge0 up");
+    
+    push( @cleanup_cmds, "echo \"ifcfg epair0a\" >> $cleanup_file");
+    push( @cleanup_cmds, "echo \"ifcfg bridge0\" >> $cleanup_file");
+    
+    $h_nodes->{$peer->{name}}->{interfaces}->{epair0b}->{jail_alias} =  $eth_obj ;
+    
+    if( defined( $peer->{prefix} )){
+        $h_nodes->{$peer->{name}}->{interfaces}->{epair0b}->{prefix} =  $peer->{prefix} ;
+    }
+    $bridge_counter++;
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  connect_bridge
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub connect_bridge{
+    my $con = shift;
+    my @interfaces = ();
+    my $iname;
+    my $peer;
+    my $link_count = 0;
+    my $bridge = "bridge".$bridge_counter;
+    my $pipe_name;
+    $bridge_counter++;
+    
+    foreach $peer (@{$con->{peers}}){
+        if( $peer->{name} ne "localhost"){
+            $iname = create_interface( $peer );
+            push( @interfaces, $iname);
+        }
+    }
+
+    if( $con->{peers}[0]->{name} eq "localhost" )
+    {
+        push( @network_cmds, "ngctl mkpeer re0: bridge lower link0");
+        push( @network_cmds, "ngctl name re0:lower $bridge");
+        push( @network_cmds, "ngctl connect re0: $bridge: upper link1");
+        $link_count = 2;	
+        push( @cleanup_cmds, "echo \"netgraph $bridge\" \>> $cleanup_file");
+        foreach $interface (@interfaces){
+            push( @network_cmds, "ngctl connect $interface: $bridge: ether link$link_count");
+            $link_count++;
+        }
+
+    }else{
+
+        foreach $interface (@interfaces){
+            if( $link_count == 0){
+                push( @network_cmds, "ngctl mkpeer $interface: pipe ether upper");
+                $pipe_name = $interface.$bridge."link0";
+                push( @network_cmds, "ngctl name $interface:ether $pipe_name");
+                push( @network_cmds, "ngctl mkpeer $pipe_name: bridge lower link0");
+                push( @network_cmds, "ngctl name $pipe_name:lower $bridge");
+                $link_count = 1;	
+
+                push( @cleanup_cmds, "echo \"netgraph $pipe_name\" \>> $cleanup_file");
+                push( @cleanup_cmds, "echo \"netgraph $bridge\" \>> $cleanup_file");
+            }
+            else{
+                push( @network_cmds, "ngctl mkpeer $interface: pipe ether upper");
+                $pipe_name = $interface.$bridge."link".$link_count;
+                push( @network_cmds, "ngctl name $interface:ether $pipe_name");
+
+                push( @network_cmds, "ngctl connect $pipe_name: $bridge: lower link$link_count");
+                $link_count++;
+
+                push( @cleanup_cmds, "echo \"netgraph $pipe_name\" \>> $cleanup_file");
+            }
+        }
+    }
+    return $bridge;
+}
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  connect_direct
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub connect_direct{
+    my ($con) = @_;
+    #my ($peer1, $peer2) = @_;
+    
+    my $peer1 = $con->{peers}->[0];
+    my $peer2 = $con->{peers}->[1];
+ 
+    my $name = $peer1->{name} ."-". $peer2->{name};
+    my $ng_obj1 = &create_interface($peer1);
+    my $ng_obj2 = &create_interface($peer2);
+    
+    push( @network_cmds, "ngctl mkpeer $ng_obj1: pipe ether lower");
+    push( @network_cmds, "ngctl name $ng_obj1:ether $name");
+    push( @network_cmds, "ngctl connect $name: $ng_obj2: upper ether");
+    
+    push( @cleanup_cmds, "echo \"netgraph $name\" \>> $cleanup_file");
+
+	# put each node to other node's neighbours list 
+    if( ($h_nodes->{$peer1->{name}}->{isrouter} == 1) and ($h_nodes->{$peer2->{name}}->{isrouter} == 1)){
+        my $address;
+
+        if( defined($peer2->{ip_addresses})){
+            foreach $address (@{$peer2->{ip_addresses}}){
+                if( $address =~ m/($IPv4)/ ){
+                    push( @{$h_nodes->{$peer1->{name}}->{ip4_neighbours}}, $1 ); 
+                }
+            }
+        }
+
+        if( defined($peer1->{ip_addresses})){
+            foreach $address (@{$peer1->{ip_addresses}}){
+                if( $address =~ m/($IPv4)/ ){
+                    push( @{$h_nodes->{$peer2->{name}}->{ip4_neighbours}}, $1 ); 
+                }
+            }
+        }
+    }
+    my $bandwidth;
+    my $delay;
+    my $metric;
+
+    # link parameters section
+    if( defined($con->{bandwidth})){
+        if($con->{bandwidth} =~ m/^(\d+)(mbps|gbps|bps|kbps)$/i){
+            $metric = lc($2);
+            if( $metric eq "gbps" ){
+                $bandwidth = $1 * 1000000000;
+            }elsif( $metric eq "mbps" ){
+                $bandwidth = $1 * 1000000;
+            }elsif( $metric eq "kbps" ){
+                $bandwidth = $1 * 1000;
+            }elsif( $metric eq "bps" ){
+                $bandwidth = $1;
+            }
+            push( @link_cmds, "ngctl  msg $name: setcfg { bandwidth=$bandwidth }");
+        }else{
+            print "Error in bandwidth definition \"$con->{bandwidth}\"\n";
+        }
+    }
+    
+    if( defined($con->{delay})){
+        if($con->{delay} =~ m/^(\d+)(s|ms|us)$/i){
+            $metric = lc($2);
+            if( $metric eq "s" ){
+                $delay = $1 * 1000000;
+            }elsif( $metric eq "ms" ){
+                $delay = $1 * 1000;
+            }elsif( $metric eq "us" ){
+                $delay = $1 ;
+            }
+            push( @link_cmds, "ngctl  msg $name: setcfg { delay=$delay }");
+        }else{
+            print "Error in delay definition \"$con->{delay}\"\n";
+        }
+    }
+    
+    if( defined($con->{upstream_ber})){
+        if($con->{upstream_ber} =~ m/^(\d+)$/i){
+            push( @link_cmds, "ngctl  msg $name: setcfg { upstream={BER=$1} }");
+        }else{
+            print "Error in upstream_ber definition \"$con->{upstream_ber}\"\n";
+        }
+    }
+    if( defined($con->{downstream_ber})){
+        if($con->{downstream_ber} =~ m/^(\d+)$/i){
+            push( @link_cmds, "ngctl  msg $name: setcfg { downstream={BER=$1} }");
+        }else{
+            print "Error in downstream_ber definition \"$con->{downstream_ber}\"\n";
+        }
+    }
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  create_interface
+#      PURPOSE:   
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub create_interface{
+    my $peer = shift;
+    my @addresses = ();
+    my $size = scalar(keys %{$h_nodes->{$peer->{name}}->{interfaces}});
+    
+    my $ngeth_obj = "ngeth".$interface_count;
+    my $eth_obj = "eth".$size;
+    
+    push( @cleanup_cmds, "echo \"netgraph $ngeth_obj\" \>> $cleanup_file");
+    
+    push( @network_cmds, "ngctl mkpeer eiface ether ether");
+    push( @network_cmds, "ifconfig $ngeth_obj vnet $peer->{name}");
+    push( @network_cmds, "jexec $peer->{name} ifconfig $ngeth_obj name $eth_obj");
+    push( @network_cmds, "jexec $peer->{name} ifconfig $eth_obj link ". create_mac());
+    push( @interface_up_cmds, "jexec $peer->{name} ifconfig $eth_obj up");
+
+    $h_nodes->{$peer->{name}}->{interfaces}->{$ngeth_obj}->{jail_alias} =  $eth_obj ;
+
+    if( defined( $peer->{prefix} )){
+        $h_nodes->{$peer->{name}}->{interfaces}->{$ngeth_obj}->{prefix} =  $peer->{prefix} ;
+    }
+   
+    my $address;
+    if( defined($peer->{ip_addresses})){
+        foreach $address (@{$peer->{ip_addresses}}){
+            if( $address ne "auto6"){
+                push( @static_ipconfig, "jexec $peer->{name} ifconfig $eth_obj $address");
+            }
+            else{
+                push( @dynamic_ipconfig, "jexec $peer->{name} rtsol -a");
+            }
+        }
+    }	
+    
+    $interface_count += 1;
+    return $ngeth_obj;
+}
+
+sub create_mac{
+    my $mac = join ":", map { sprintf("%x", int(rand(255))) } 1..3;
+    return "00:0c:6e:".$mac;
+}
+#===  FUNCTION  ================================================================
+#         NAME:  create_connections
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub create_connections{
+    my $node_name;
+    my $peer_name;
+    my $peer;
+    $interface_count = 0;
+    $bridge_counter = 0;
+    my $peer_index;
+    my $bridge;
+    my $iname;
+    my $iname1;
+    my $iname2;
+    my @bridge_interfaces;
+    
+    foreach $con (@{$yaml->[0]->{connections}}){
+        if( $con->{type} eq "direct"){
+            &connect_direct( $con);
+        }
+        elsif( $con->{type} eq "bridge" ){
+            &connect_bridge( $con );
+        }
+    }
+}
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  configure_routing
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub configure_routing{
+
+    my $interface_name;
+    my $ip_conf;
+    my $zebra_args;
+    my $ripng_args;
+    my $jail_interface;
+    
+    foreach $node_name (keys %{$h_nodes}){
+
+        if( $node_name eq "localhost" ){
+    	    next;
+        }
+    
+        if( $h_nodes->{$node_name}->{isrouter} == 1 ){
+        
+            push( @zebra_ripng_cmds, "mkdir -p $quagga_dir_host/$node_name");
+            push( @zebra_ripng_cmds, "cp $quagga_dir_host/zebra.conf $quagga_dir_host/$node_name");
+            push( @zebra_ripng_cmds, "cp $quagga_dir_host/ripngd.conf $quagga_dir_host/$node_name");
+            
+            push( @zebra_ripng_cmds, "jexec $node_name chown -R quagga $quagga_dir_jail"); 
+            push( @zebra_ripng_cmds, "jexec $node_name ifconfig lo0 localhost");
+            
+            $zebra_args = "";
+            $ripng_args = "";
+            $rip_args = "";
+            
+            foreach (keys %{$h_nodes->{$node_name}->{interfaces}}){
+
+                $jail_interface = $h_nodes->{$node_name}->{interfaces}->{$_}->{jail_alias};
+                $ripng_args .= " -i $jail_interface "; 
+
+                if( defined($h_nodes->{$node_name}->{interfaces}->{$_}->{prefix})){
+                    $zebra_args .= " -i $jail_interface-$h_nodes->{$node_name}->{interfaces}->{$_}->{prefix} ";
+                }
+                else{
+                    $zebra_args .= " -i $jail_interface";	
+                }
+            }
+            
+            foreach (@{$h_nodes->{$node_name}->{ip4_neighbours}}){
+                $rip_args .= " -n $_ "; 
+            }
+            
+            if( $h_nodes->{$node_name}->{distribute} == 1){
+                $ripng_args .= " -d ";	
+                $rip_args .= " -d ";	
+            }
+            
+            push( @zebra_ripng_cmds, "$kovan_dir/bin/kovanQuaggaConf $zebra_args --zebra -o $quagga_dir_host/$node_name/zebra.conf");
+            push( @zebra_ripng_cmds, "jexec $node_name /usr/local/sbin/zebra -i $quagga_dir_jail/$node_name/$node_name.zebra.pid -f $quagga_dir_jail/$node_name/zebra.conf -d");
+            
+            push( @zebra_ripng_cmds, "$kovan_dir/bin/kovanQuaggaConf $ripng_args --ripngd -o $quagga_dir_host/$node_name/ripngd.conf");
+            push( @zebra_ripng_cmds, "$kovan_dir/bin/kovanQuaggaConf $rip_args --ripd -o $quagga_dir_host/$node_name/ripd.conf");
+            push( @zebra_ripng_cmds, "jexec $node_name /usr/local/sbin/ripngd -i $quagga_dir_jail/$node_name/$node_name.ripngd.pid -f $quagga_dir_jail/$node_name/ripngd.conf -d ");
+            push( @zebra_ripng_cmds, "jexec $node_name /usr/local/sbin/ripd -i $quagga_dir_jail/$node_name/$node_name.ripd.pid -f $quagga_dir_jail/$node_name/ripd.conf -d ");
+        }
+    }
+}

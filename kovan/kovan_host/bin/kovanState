@@ -1,0 +1,169 @@
+#!/usr/bin/perl -w
+
+use constant APPNAME  => "kovanState";
+use YAML::Tiny;
+use Getopt::Long;
+use Cwd 'abs_path';
+use POSIX qw(strftime);
+
+my $kvn_prefix;
+my $monitor_prefix;
+my $node_prefix;
+my $router_prefix;
+my $topology_file;
+my $state_dir;
+my @files2save; 
+
+
+
+&read_and_finish();
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub usage {
+    print "usage:\t".APPNAME." -c conf_file --save state_name\n";
+    print "      \t".APPNAME." -c conf_file --load state_name\n";
+    exit 1;
+}
+#===  FUNCTION  ================================================================
+#         NAME:  read_and_finish
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub read_and_finish{
+
+    my $save_mode;
+    my $load_mode;
+    my $state_name;
+    my $files;
+	my $filename;
+	my $clean_mode;
+    my $conf_file;
+    
+    my $result = Getopt::Long::GetOptions(
+            "c=s"  => \$conf_file,
+            "save" => \$save_mode,
+            "load" => \$load_mode,
+            "clean" => \$clean_mode,
+            );
+
+    if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else{
+        printf(STDERR "Configuration file must be given\n");
+        &usage();
+    }
+
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+    $jail_roots = $yaml->[0]->{jail_roots};
+    $kvn_prefix = $yaml->[0]->{kovan_dir};
+    $monitor_prefix = $jail_roots->{monitor};
+    $node_prefix = $jail_roots->{node};
+    $router_prefix = $jail_roots->{router};
+    $topology_file= $kvn_prefix . "/topology.tmp";
+    $state_dir = $kvn_prefix. "/state";
+
+
+    # Current running configuration should be added to list
+    @files2save = ( 
+        "$node_prefix/usr/local/kovan/etc",
+        ### Mrtg 
+        "$monitor_prefix/usr/local/etc/mrtg",
+        "$monitor_prefix/usr/local/www/mrtg",
+        ## Nfsen
+        "$monitor_prefix/usr/local/var/nfsen/profiles/live/*",
+        "$monitor_prefix/usr/local/var/nfsen/profiles-data/live/*",
+        "$monitor_prefix/usr/local/var/nfsen/profiles-stat/live/*.png",
+        "$monitor_prefix/usr/local/var/nfsen/profiles-stat/live/*.rrd",
+        "$monitor_prefix/usr/local/var/nfsen/run/*",
+        "$monitor_prefix/usr/local/etc/nfsen.conf",
+        ## Nagios 
+        "$monitor_prefix/usr/local/etc/nagios/*.cfg",
+        "$monitor_prefix/var/spool/nagios/archives/*",
+        "$monitor_prefix/var/spool/nagios/checkresults/*" ,
+        "$monitor_prefix/var/spool/nagios/rw/*",
+        "$monitor_prefix/var/spool/nagios/status.dat",
+        "$monitor_prefix/var/spool/nagios/nagios.log",
+        "$monitor_prefix/var/spool/nagios/objects.cache",
+        ### Mysql
+        "$monitor_prefix/var/db/mysql/*",
+        "$monitor_prefix/usr/local/www/stats/*.png"
+    );
+
+    
+    if( defined($clean_mode)){
+		if( $ARGV[0] ){
+			&usage();
+		}
+        foreach (@files2save){
+			print "Removing file: $_\n";
+		   `rm -rvf $_`;
+        }
+
+	}else{ 
+   
+        if( !$ARGV[0] ){
+            &usage();
+        }
+ 
+        $state_name = $ARGV[0];
+
+        if( (!defined($save_mode) && !defined($load_mode)) 
+            || (defined($save_mode) && defined($load_mode)) 
+	    	|| !defined($state_name)){
+            &usage();
+        }
+
+
+	    if( defined($save_mode) ){
+
+	    	if(-e "$kvn_prefix/topology.tmp"){
+
+                $config_file = `cat $kvn_prefix/topology.tmp | grep config_file | awk '{ print \$2 }'`;
+                chomp( $config_file);
+                $config_file = abs_path($config_file);
+                $files = "$config_file ";
+                foreach (@files2save){
+                    $files .= $_ ." ";
+                } 
+
+                $filename = strftime " $state_dir/$state_name\_%d.%m.%Y.tar.gz", localtime;
+                `tar -czvf $filename $files`; 
+                print "State saved to file $filename\n";
+	    	
+            }else{
+	    		print "Not a currently running Kovan instance is found\n";
+	    		print "Running system information file \"$kvn_prefix/topology.tmp\" does not exist!\n"; 
+	    	}
+	    	
+
+	    }elsif( defined($load_mode)){
+	    	$filename = "$state_dir/$state_name";
+	    	if (-e $filename){
+            	     `tar -xzvf $filename -C /`;
+	    	}else{
+	    		print "Status file \"$filename\" does not exist!\n"; 
+	    	}
+	    }
+	}
+}

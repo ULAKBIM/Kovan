@@ -1,0 +1,112 @@
+#!/usr/local/bin/perl
+#Yavuz Gokirmak yavuzg at ulakbim [dot] gov [dot] tr
+
+use DBI;
+use GD::Graph::hbars;
+use Getopt::Long;
+use constant APPNAME  => "kovan_graph";
+
+my $sql_user = "logger";
+my $sql_password = "060112";
+my $sql_datasource = "dbi:mysql:kovan:localhost";
+    
+my $graph_font_path = "/usr/local/kovan/etc/droidsans.ttf";
+my $outputfile;
+my $x_axis;
+my $y_axis;
+my $query;
+my $header;
+
+&read_args();
+
+# connect to database
+my $db = DBI->connect($sql_datasource, $sql_user, $sql_password);
+
+my $sth = $db->prepare($query);
+
+# execute statement
+$sth->execute() or die "Couldn't execute statement: " . $sth->errstr;
+
+my (@x_axis_data, @y_axis_data);
+my @data_row;
+
+# fetch each row and push to axis arrays. Draw the graph by taking last column as y axis.
+while (@data_row = $sth->fetchrow_array()) 
+{
+    if( @data_row eq 2 ){
+        push(@x_axis_data,@data_row[0].'('.@data_row[1].')');
+        push(@y_axis_data,@data_row[1]);
+    }
+    elsif( @data_row eq 3 ){
+        push(@x_axis_data,@data_row[0]." ".@data_row[1]." ".'('.@data_row[2].')');
+        push(@y_axis_data,@data_row[2]);
+    }
+}
+
+# fill two dimensional array
+my @data  = ([@x_axis_data],[@y_axis_data]);
+
+# set graph properties
+my $graph = GD::Graph::hbars->new;
+$graph->set_title_font($graph_font_path, 10) or warn $graph->error;
+$graph->set_x_label_font($graph_font_path, 10) or warn $graph->error;
+$graph->set_y_label_font($graph_font_path, 10) or warn $graph->error;
+$graph->set_x_axis_font($graph_font_path, 10) or warn $graph->error;
+$graph->set_y_axis_font($graph_font_path, 10) or warn $graph->error;
+
+$graph->set(	x_label => "$x_axis",
+    y_label => "$y_axis", 
+    title   => "$header",
+    transparent => 0,
+    bar_spacing => 8,
+    shadow_depth => 0,
+    shadowclr => 'dred',
+    transparent => 0, 
+    dclrs  => ['#9999CC', '#CCCC66', '#339900','#990000', '#FFCC33'],
+    boxclr  => '#FFFFFF',
+    y_tick_number => 0,
+    y_plot_values => 0
+) or warn $graph->error;
+
+my $image = $graph->plot(\@data) or die $graph->error;
+
+open (IMG,">$outputfile") or die $! ;
+binmode IMG;
+print IMG $image->png ;
+
+$sth->finish();
+$db->disconnect();
+
+1;
+
+sub usage {
+    print "usage:\t".APPNAME." --outputfile NAME --xaxis TITLE --yaxis TITLE --query QUERY --header HEADER\n";
+}
+
+
+sub read_args{
+
+    my $result = Getopt::Long::GetOptions(
+            "outputfile=s"  => \$outputfile,
+            "xaxis=s" => \$x_axis,
+            "yaxis=s" => \$y_axis,
+            "query=s" => \$query,
+            "header=s" => \$header
+            );
+
+    if( $ARGV[0] ){
+        printf(STDERR "Unrecognized options\n");
+        foreach (@ARGV) {
+            printf(STDERR "$_\n");
+        }
+        &usage();
+        exit -1;
+    }
+
+    if( !defined($outputfile) or !defined($x_axis) or !defined($y_axis)
+        or !defined($query) or !defined($header) ){
+        &usage();
+        exit -1;
+    }
+}
+

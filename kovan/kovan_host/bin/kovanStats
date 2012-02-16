@@ -1,0 +1,289 @@
+#!/usr/bin/perl -w
+use constant APPNAME  => "kovanStats";
+use YAML::Tiny;
+use Getopt::Long;
+
+my $conf_file;
+my $kovan_dir;
+my $stats_conf_dir;
+my $stats_bin_dir;
+my $stats_web_dir;
+my $crontab = "/usr/local/kovan/etc/kovan.cron";
+my $monitor_host;
+my $apache_conf_file = "/usr/local/etc/apache22/httpd.conf";
+my $running_file;
+
+&read_args();
+
+sub install {
+
+    #check for httpd.conf file
+    if( !(-e $monitor_dir . $apache_conf_file) )
+    {
+        print "$monitor_dir$apache_conf_file does not exists. Please find and copy an httpd.conf file to $monitor_dir$apache_conf_file\n";
+        return -1;
+    }
+    #check directories for creating
+    if( !(-e $stats_conf_dir) )
+    {
+        push (@result_cmds, "mkdir -p $stats_conf_dir");
+    }
+    if( !(-e $monitor_dir.$crontab) )
+    {
+        push (@result_cmds, "touch $monitor_dir$crontab");
+    }
+    if( !(-e $stats_bin_dir) )
+    {
+	push (@result_cmds, "mkdir -p $stats_bin_dir");
+    }
+    foreach (@result_cmds)
+    {
+        print "$_\n";
+        if(system($_) ne 0)
+        {
+            print "command not executed\n";
+            return -1;
+        }
+    }
+    return 1;
+}
+
+sub configure 
+{
+    $cron_string = "10  * * * *  /usr/local/kovan/bin/kovanGraph_hourly.sh\n0 3  * * *  /usr/local/kovan/bin/kovanGraph_daily.sh";
+    $crontab = $monitor_dir.$crontab;
+    #open and parse file in slurp mode for regex.
+    open FILE,   "< $crontab " or die "can not open dist file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <FILE>;
+    $/ = $old;
+    #file for temporary output
+    open FILE2,  " >>  $crontab.temp " or die $!;
+
+
+    if( $whole_file =~ m/(##kvn_stats_s\s*)(10)(.*?)(##kvn_stats_f)/sg)
+    {
+        $whole_file =~ s/(##kvn_stats_s\s*)(10)(.*?)(##kvn_stats_f)/$1$cron_string\n$4/sg;
+        print FILE2 $whole_file;
+        print "regex : $cron_string checked\n";
+    }
+    else
+    {
+	print FILE2 $whole_file;
+        print FILE2 "\n##kvn_stats_s\n".$cron_string."\n##kvn_stats_f\n";
+        print "regex : $cron_string defined\n";
+    }
+    close(FILE2);
+    close(FILE);
+
+    #move temporary output file as hosts file
+    if(system("mv $crontab.temp $crontab") ne 0)
+    {
+       return -1;
+    }
+    print "mv $crontab.temp $crontab\n";
+
+    #open and parse file in slurp mode for regex.
+    open APACHE_IN,   " < $monitor_dir$apache_conf_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $apache_whole_file= <APACHE_IN>;
+    $/ = $old;
+    #file for temporary output
+    open APACHE_OUT,  " >> $monitor_dir$apache_conf_file.temp" or die "can not open apache file.";
+    print "$monitor_dir$apache_conf_file.temp file created\n";	
+
+	@stats_apache_conf ="
+<Directory /usr/local/www/stats>
+	Options None
+	AllowOverride None
+	Order allow,deny
+	Allow from all
+</Directory>
+Alias /stats /usr/local/www/stats\n";
+
+	#regex
+    if( $apache_whole_file =~ m/(##kvn_stats_s\s*)(<Directory)(.*?)(##kvn_stats_f)/s)
+    {
+        $apache_whole_file =~ s/(##kvn_stats_s\s*)(<Directory)(.*?)(##kvn_stats_f)/$1@stats_apache_conf$4/s;
+        print APACHE_OUT $apache_whole_file;
+        print "regex : <Directory> checked\n";
+    }
+    else
+    {
+        print APACHE_OUT $apache_whole_file;
+        print APACHE_OUT "\n##kvn_stats_s@stats_apache_conf##kvn_stats_f\n";
+        print "regex : <Directory> defined\n";
+    }
+    close APACHE_OUT;
+    close APACHE_IN;
+
+    if(system("mv $monitor_dir$apache_conf_file.temp $monitor_dir$apache_conf_file") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    print "mv $monitor_dir$apache_conf_file.temp $monitor_dir$apache_conf_file\n";
+	
+	return 1;	
+}
+
+sub execute
+{
+    #add file to crontab of root
+    if (system("jexec $monitor_host csh -c \"/usr/bin/crontab -u root $crontab\"") ne 0)
+    {
+        print "command not executed\n";
+        return -1;
+    }
+    else
+    {
+        print "/usr/bin/crontab -u root $crontab\n";
+    }
+
+    #check if apache already running
+    if(system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestatus\"") ne 0)
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    else
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+
+    return 1;
+}
+
+
+#reading arguments and check for errors
+sub read_args{
+
+   # Arguments
+    my $result = Getopt::Long::GetOptions(
+            "c=s"           => \$conf_file,
+            "help"          => \$help,
+            "install"       => \$install,
+            "configure"     => \$configure,
+            "execute"       => \$execute,
+    );
+
+    if(defined($help))
+    {
+        &usage();
+    }
+
+    if( $ARGV[0] )
+    {
+        printf(STDERR "Unrecognized options\nType ".APPNAME." --help for usage.\n");
+        exit -1;
+    }
+
+    if( !(defined($install) or defined($configure) or defined($execute)) )
+    {
+        print "Please give at least one of the parameters from [--install|--configure|--execute]\n";
+        &usage();
+    }
+
+    if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else
+	{
+        printf(STDERR "Configuration file must be given\n");
+        &usage();
+	}
+
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+
+	$jail_roots = $yaml->[0]->{jail_roots};
+        $kovan_dir = $yaml->[0]->{kovan_dir};
+	$monitor_dir = $jail_roots->{monitor};
+	$stats_conf_dir = $monitor_dir."/usr/local/kovan/etc";
+	$stats_bin_dir = $monitor_dir."/usr/local/kovan/bin";
+	$stats_web_dir = $monitor_dir."/usr/local/www/stats";
+
+	$running_file = $kovan_dir . "/topology.tmp";
+    if( !(-e $running_file) )
+    {
+        print "Kovan is not running!\nPlease execute kovan before using the scripts.\n";
+        &usage();
+    }
+
+    #monitor_host
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if($dev->{type} eq "monitor")
+        {
+            $monitor_host = $dev->{name};
+        }
+    }
+
+    #return_code for error checking
+    my $return_code;
+
+    if( defined($install))
+    {
+        $return_code = &install;
+        if($return_code eq 1)
+        {
+            print "INSTALL OK : $return_code\n";
+        }
+        else
+        {
+            print "INSTALL ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($configure))
+    {
+        $return_code = &configure;
+        if($return_code eq 1)
+        {
+            print "CONFIGURE OK : $return_code\n";
+        }
+        else
+        {
+            print "CONFIGURE ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($execute))
+    {
+        $return_code = &execute;
+        if($return_code eq 1)
+        {
+            print "EXECUTE OK : $return_code\n";
+        }
+        else
+        {
+            print "EXECUTE ERROR : $return_code\n";
+        }
+    }
+}
+	
+#Show optional parameters
+sub usage {
+    print "Usage:\t./".APPNAME." [-c kovan_conf_file]  [--install|--configure|--execute]
+Options :
+\t-c kovan_conf_file                 : kovan configuration file
+\t--install                          : checks for files and copy them for configuring
+\t--configure                        : executes regex on files and configures them
+\t--execute                          : runs the binary\n";
+exit -1;
+}
+

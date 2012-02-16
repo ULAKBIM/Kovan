@@ -1,0 +1,625 @@
+#!/usr/bin/perl   -w 
+use constant APPNAME  => "kovanNagios";
+use File::Copy;
+use YAML::Tiny;
+use Getopt::Long;
+
+my $kovan_dir;
+my $apache_conf_file;
+my $nagios_dir;
+my $mail_address;
+my $running_file;
+
+&read_args();
+
+sub install 
+{
+    if( ! -e $apache_conf_file )
+    {
+        print "$apache_conf_file does not exists. Please find and copy an httpd.conf file to $apache_conf_file\n";
+        return -1;
+    }
+    
+    #Prepare the files for nagios configuration
+    my @result_cmds;
+    push (@result_cmds, "cp $nagios_dir/nagios.cfg-sample   $nagios_dir/nagios.cfg");
+    push (@result_cmds, "cp $nagios_dir/cgi.cfg-sample      $nagios_dir/cgi.cfg");
+    push (@result_cmds, "cp $nagios_dir/resource.cfg-sample $nagios_dir/resource.cfg");
+    $objects_dir = "$nagios_dir/objects";
+    push (@result_cmds, "cp $objects_dir/commands.cfg-sample    $objects_dir/commands.cfg");
+    push (@result_cmds, "cp $objects_dir/contacts.cfg-sample    $objects_dir/contacts.cfg");
+    push (@result_cmds, "cp $objects_dir/timeperiods.cfg-sample $objects_dir/timeperiods.cfg");
+    push (@result_cmds, "cp $objects_dir/templates.cfg-sample   $objects_dir/templates.cfg");
+    push (@result_cmds, "cp $objects_dir/localhost.cfg-sample   $objects_dir/localhost.cfg");
+    if(-e "$kovan_dir/monitor/usr/local/libexec/nagios/kovanNagiosCheck")
+    {
+        print "/usr/local/libexec/nagios/kovanNagiosCheck exists\n";
+    }
+    else
+    {
+        print "Couldn't find kovanNagiosCheck\nCheck if kovan installed correctly\n";
+        return -1;
+    }
+
+    foreach (@result_cmds)
+    {
+        print "$_\n";
+        if(system($_) ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    return 1;
+}
+
+sub configure
+{
+
+    ###### APACHE ######
+    #slurp file
+    open APACHE_IN,   " < $apache_conf_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $apache_whole_file= <APACHE_IN>;
+    $/ = $old;
+
+    open APACHE_OUT,  " >> $apache_conf_file.temp" or die "can not open apache file.";
+	print "$apache_conf_file.temp file created\n"; 
+    @nagios_apache_conf=
+    "
+    <Directory /usr/local/www/nagios>
+    Options None
+    AllowOverride None
+    Order allow,deny
+    Allow from all
+
+    </Directory>
+
+    <Directory /usr/local/www/nagios/cgi-bin>
+    AllowOverride None
+    Options ExecCGI
+    Order allow,deny
+    Allow from all
+
+    </Directory>
+
+    ScriptAlias /nagios/cgi-bin/ /usr/local/www/nagios/cgi-bin/
+    Alias /nagios /usr/local/www/nagios\n";
+
+    if( $apache_whole_file =~ m/(##kvn_nagios_s\s*)(<Directory)(.*?)(##kvn_nagios_f)/s)
+    {
+        $apache_whole_file =~ s/(##kvn_nagios_s\s*)(<Directory)(.*?)(##kvn_nagios_f)/$1@nagios_apache_conf$4/s;
+        print APACHE_OUT $apache_whole_file;
+		print "regex : <Directory> checked\n";
+    }
+    else
+    {
+        print APACHE_OUT $apache_whole_file;
+        print APACHE_OUT "\n##kvn_nagios_s@nagios_apache_conf##kvn_nagios_f\n";
+		print "regex : <Directory> added end of the file\n";
+    }
+    close APACHE_OUT;
+    close APACHE_IN;
+
+    if(system("mv $apache_conf_file.temp $apache_conf_file") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    else
+    {
+		print "mv $apache_conf_file.temp $apache_conf_file\n";
+    }
+    ######  APACHE  ######
+
+    ######  NAGIOS  ######
+    $objects_dir = "$nagios_dir/objects";
+    ##regex - templates.cfg
+    #slurp file
+    open TEMPLATES_IN,   " < $objects_dir/templates.cfg" or die "can not open templates.cfg file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <TEMPLATES_IN>;
+    $/ = $old;
+
+    open TEMPLATES_OUT,  " >> $objects_dir/templates.cfg.temp" or die "can not open templates.cfg file."; 
+    print "$objects_dir/templates.cfg..temp file created\n"; 
+    if( $whole_file =~ m/(##kvn_nagios_s\s*)(check_command)(.*?)(##kvn_nagios_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nagios_s\s*)(check_command)(.*?)(##kvn_nagios_f)/$1$2\t\t\tcheck-kovan-alive ;\n\t$4/s;
+		print "regex : check-kovan-alive checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/check_command(.*?)\n/##kvn_nagios_s\n\tcheck_command\t\t\tcheck-kovan-alive ;\n\t##kvn_nagios_f\n/s;
+		print "regex : check_command -> check-kovan-alive defined\n";
+    }
+    print TEMPLATES_OUT $whole_file;
+    close(TEMPLATES_OUT);
+    close(TEMPLATES_IN);
+    
+    if(system("mv $objects_dir/templates.cfg.temp $objects_dir/templates.cfg") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    else
+    {
+		print "mv $objects_dir/templates.cfg.temp $objects_dir/templates.cfg\n";
+    }
+    ##regex - templates.cfg
+    
+    ##regex - contacts.cfg
+    #slurp file
+    open CONTACTS_IN,   " < $objects_dir/contacts.cfg" or die "can not open contacts.cfg file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <CONTACTS_IN>;
+    $/ = $old;
+
+    open CONTACTS_OUT,  " >> $objects_dir/contacts.cfg.temp" or die "can not open contacts.cfg file.";
+	print "$objects_dir/contacts.cfg.temp file created\n";
+    if( $whole_file =~ m/(##kvn_nagios_s\s*)(email)(.*?)(##kvn_nagios_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nagios_s\s*)(email)(.*?)(##kvn_nagios_f)/$1$2\t\t\t$mail_address ;\n\t$4/s;
+		print "regex : email checked\n"; 
+    }
+    else
+    {
+        $whole_file =~ s/email(.*?)\n/##kvn_nagios_s\n\temail\t\t\t\t$mail_address ;\n\t##kvn_nagios_f\n/s;
+		print "regex : email defined\n";
+    }
+    
+	print CONTACTS_OUT $whole_file;
+    close(CONTACTS_OUT);
+    close(CONTACTS_IN);
+
+    if(system("mv $objects_dir/contacts.cfg.temp $objects_dir/contacts.cfg") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    else
+    {
+		print "mv $objects_dir/contacts.cfg.temp $objects_dir/contacts.cfg\n";
+    } 
+    ##regex - contacts.cfg
+   
+    ##regex - commands.cfg
+    open COMMANDS_IN,   " < $objects_dir/commands.cfg" or die "can not open commands.cfg file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <COMMANDS_IN>;
+    $/ = $old;
+
+    open COMMANDS_OUT,  " >> $objects_dir/commands.cfg.temp" or die "can not open commands.cfg file.";
+    print "$objects_dir/commands.cfg.temp file created\n"; 
+    if( $whole_file =~ m/(##kvn_nagios_s)(.*?\s)(command_line)(.*?)(check_udp)(.*?\s)(##kvn_nagios_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nagios_s)(.*?\s)(command_line)(\s)(check_udp)(.*?\s)(##kvn_nagios_f)/$1$2$3$4$5 -H \$HOSTADDRESS\$ -p \$ARG1\$ -s \$ARG2\$ -e \$ARG3\$\n\t$7/s;
+		print "regex : check_udp checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/(command_line)(\s)(\$USER1\$\/check_udp)(.*?\s)(})/##kvn_nagios_s\n\t$1$2$3 -H \$HOSTADDRESS\$ -p \$ARG1\$ -s \$ARG2\$ -e \$ARG3\$\n\t##kvn_nagios_f\n\t$5/s;
+		 print "regex : check_udp defined\n";
+    } 
+    
+    $commands = "define command{
+    command_name    kovanNagiosCheck
+    command_line    \$USER1\$/kovanNagiosCheck -H \$HOSTADDRESS\$ -C \$ARG1\$ -p \$ARG2\$
+    }\ndefine command{
+    command_name    check-kovan-alive
+    command_line    \$USER1\$/kovanNagiosCheck -H \$HOSTADDRESS\$ -P
+    }";
+
+    if( $whole_file =~ m/(##kvn_nagios_s)(.*?\s)(command_name)(.*?)(kovanNagiosCheck)(.*?\s)(##kvn_nagios_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nagios_s)(.*?\s)(command_name)(.*?)(kovanNagiosCheck)(##kvn_nagios_f)/$1\n$commands\n$6/s;
+		print "regex : kovanNagiosCheck checked\n";
+        print COMMANDS_OUT $whole_file;
+    }
+    else
+    {
+        print COMMANDS_OUT $whole_file;
+        print COMMANDS_OUT "##kvn_nagios_s\n" . $commands . "\n##kvn_nagios_f\n";
+		print "regex : kovanNagiosCheck added end of the file\n";
+    } 
+    
+	close(COMMANDS_OUT);
+    close(COMMANDS_IN);
+
+    if(system("mv $objects_dir/commands.cfg.temp $objects_dir/commands.cfg") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    else
+    {
+		print "mv $objects_dir/commands.cfg.temp $objects_dir/commands.cfg\n";
+    }
+    ##regex - commands.cfg
+
+    ##regex - localhost.cfg
+    open LOCALHOST_OUT,   " >>  $objects_dir/localhost.cfg.tmp" or die "can not open localhost.cfg file.";
+	print "$objects_dir/localhost.cfg.tmp file created\n";
+    $whole_file= "\n############# HOST DEFINITIONS #############\n\n";
+    foreach $devices ( @{$yaml->[0]->{devices}})
+    {
+		$node_name = $devices->{name};	
+        if (($node_name ne "MONITOR") and ($node_name ne "localhost"))
+        {
+			$str  = " ";
+			$type = &device_type($node_name);
+			$node_ip = `jexec $node_name ifconfig | grep 'inet6 2001' | head -n 1| awk '{print \$2}'`;
+			chomp($node_ip);
+			if ($whole_file =~ m/(.*?\s)host_name(.*?)$node_name(.*?\s)/s )
+			{
+				print "regex : $node_name host definition checked\n";
+			}
+			else
+			{
+				$str .= "
+define host  {
+		use                         freebsd-server
+		host_name                   $node_name
+		alias                       $node_name-$type-host
+		address                     $node_ip
+}
+";
+				print "regex : $node_name host definition defined\n";
+			}
+			$whole_file .= $str;
+        }
+    }
+    $whole_file .= "\n############# SERVICE DEFINITIONS #############\n\n";
+    my @nodes;
+	foreach $service ( @{$yaml->[0]->{services}})
+    {
+        if ($service->{node} ne "monitor_host")
+        {
+            @nodes = &get_nodes($service->{node});
+            $command = $service->{command};
+            $str  = " ";
+            foreach $node (@nodes)
+            {
+                $type = &device_type($node);
+                if( ($type eq "router") or ($type eq "blackhole") )
+                {
+                    if($str =~ m/service{(.*?\s)$node(.*?\s)service_description(.*?\s)$service->{name}(.*?\s)}/s )
+                    {
+						print "regex : $node -  $service->{name} service definition checked\n";
+                    }
+                    else
+                    {
+                        $str .= "
+define service   {
+			use                             local-service
+			host_name                       $node
+			service_description             $service->{name}-service
+			check_command                   kovanNagiosCheck!$snmp_community!$service->{name}
+}
+";
+					print "regex : $node -  $service->{name} service definition defined\n";
+                    }
+                }
+                elsif($type eq "node")
+                {
+                    if($str =~ m/service{(.*?\s)$node(.*?\s)service_description(.*?\s)$service->{name}(.*?\s)}/s )
+                    {
+						print "regex : $node -  $service->{name} service definition checked\n";
+                    }
+                    else
+                    {
+                        if ($command =~ m/(.*?)(-p\s)([0-9]*)/s )
+                        {
+                            $port=$3;
+                        }
+                        if(defined($port))
+                        {
+                            if($service->{name} eq "kovan_dns_6")
+                            {
+                                $str .= "\ndefine service   {
+                                use                             local-service
+                                host_name                       $node
+                                service_description             $node-$service->{name}-service
+                                check_command                   check_udp!$port!\"send\"!\"\"\n}\n";
+								print "regex : $node -  $service->{name} service definition defined\n";
+                            }
+                            else
+                            {
+                               $str .= "\ndefine service   {
+                                use                             local-service
+                                host_name                       $node
+                                service_description             $node-$service->{name}-service
+                                check_command                   check_tcp!$port\n}\n"; 
+								print "regex : $node -  $service->{name} service definition defined\n";
+                            }
+                        }
+                    }
+                }
+            }
+            $whole_file .= $str;
+        }
+    }
+    print LOCALHOST_OUT $whole_file; 
+    close LOCALHOST_OUT;
+
+    if(system("mv $objects_dir/localhost.cfg.tmp $objects_dir/localhost.cfg") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    } 
+    else
+    {
+		print "mv $objects_dir/localhost.cfg.tmp $objects_dir/localhost.cfg\n";	
+    } 
+    ##regex - localhost.cfg
+
+    ##regex - cgi.cfg
+    #slurp file
+    open CGI_IN,   " < $nagios_dir/cgi.cfg" or die "can not open cgi.cfg file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <CGI_IN>;
+    $/ = $old;
+
+    open CGI_OUT,  " >> $nagios_dir/cgi.cfg.temp" or die "can not open cgi.cfg file.";
+	print "$nagios_dir/cgi.cfg.temp file created\n";
+    if( $whole_file =~ m/(##kvn_nagios_s)\n(use_authentication)(.*?)\n(##kvn_nagios_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nagios_s)\n(use_authentication)(.*?)\n(##kvn_nagios_f)/$1\n$2=0\n$4/s;
+		print "regex : use_authentication checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/use_authentication=1/##kvn_nagios_s\nuse_authentication=0\n##kvn_nagios_f/s;
+		print "regex : use_authentication defined\n";
+    }
+    print CGI_OUT $whole_file;
+    close(CGI_OUT);
+    close(CGI_IN);
+    
+    if(system("mv $nagios_dir/cgi.cfg.temp $nagios_dir/cgi.cfg") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    } 
+    else
+    {
+		print "mv $nagios_dir/cgi.cfg.temp $nagios_dir/cgi.cfg\n";
+    }
+    ##regex - cgi.cfg
+
+    ######  NAGIOS  ######
+    return 1; 
+}
+
+sub execute
+{
+	#check if nagios already running
+	if(system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/nagios onestatus\"") ne 0)
+	{
+		if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/nagios onestart\"") ne 0)
+		{
+			print "command not finished\n";
+			return -1; 
+		}
+	}
+	else
+	{
+		if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/nagios onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+	}
+
+	#check if apache already running
+    if(system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestatus\"") ne 0)
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    else
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    return 1;
+}
+
+
+sub get_nodes {
+    my $node = shift;
+    my @nodes;
+
+    if( $node eq "all-devices" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( $node eq "all-routers" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{type} eq "router" and $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( $node eq "all-nodes" ){
+        foreach ( @{$yaml->[0]->{devices}}){
+            if( $_->{type} eq "node" and $_->{name} ne "localhost" ){
+                push( @nodes, $_->{name});
+            }
+        }
+    }
+    elsif( &is_device($node)){
+        push( @nodes, $node);
+    }
+    else{
+    }
+
+    return @nodes;
+
+}
+
+sub is_device {
+    my $node = shift;
+    my $ret = 0;
+
+    foreach $dev ( @{$yaml->[0]->{devices}}){
+        if( $dev->{name} eq $node ){
+            $ret = 1;
+            last;
+        }
+    }
+
+    return $ret;
+}
+
+
+
+sub device_type {
+    my $node = shift;
+    foreach $dev ( @{$yaml->[0]->{devices}})
+    {
+        if( $dev->{name} eq $node){
+            return $dev->{type};
+        }
+    }
+}
+
+sub read_args{
+
+    # Arguments
+    my $result = Getopt::Long::GetOptions(
+        "c=s"           => \$conf_file,
+        "help"          => \$help,
+        "install"       => \$install,
+        "configure"     => \$configure,
+        "execute"       => \$execute,
+        "mail:s"        => \$mail_address,
+        "snmp:s"        => \$snmp_community,
+    );
+
+    if(defined($help))
+    {
+        &usage();
+    }
+   
+    if( $ARGV[0] )
+    {
+        printf(STDERR "Unrecognized options\nType ".APPNAME." --help for usage.\n");
+        exit -1;
+    }
+
+    if( !(defined($install) or defined($configure) or defined($execute)) )
+    {
+        print "Please give at least one of the parameters from [--install|--configure|--execute]\n";
+        &usage();
+    }
+    
+    
+    if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else{
+        printf(STDERR "Configuration file must be given\n");
+        &usage();
+    }
+
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+    $kovan_dir = $yaml->[0]->{kovan_dir};
+	$running_file = $kovan_dir . "/topology.tmp";
+
+    if( !(-e $running_file) )
+    {
+        print "Kovan is not running!\nPlease execute kovan before using the scripts.\n";
+        &usage();
+    }
+
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if($dev->{type} eq "monitor")
+        {
+            $monitor_host = $dev->{name};
+        }
+    }
+
+    $apache_conf_file="$kovan_dir/monitor/usr/local/etc/apache22/httpd.conf" ;
+    $nagios_dir = "$kovan_dir/monitor/usr/local/etc/nagios";
+
+    my $return_code;
+    if( defined($install) )
+    {
+        $return_code = &install;
+        if($return_code eq 1)
+        {
+            print "INSTALL OK : $return_code\n";
+        }
+        else
+        {
+            print "INSTALL ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($configure) )
+    {
+        if(!(defined($mail_address) and defined($snmp_community)))
+        {
+            print "Both parameters mail address and snmp community have to be given when the configuration is executed.\n";
+            &usage();
+        }
+        $return_code = &configure;
+        if($return_code eq 1)
+        {
+            print "CONFIGURE OK : $return_code\n";
+        }
+        else
+        {
+            print "CONFIGURE ERROR : $return_code\n";
+        }
+    }
+    
+    if( defined($execute))
+    {
+        $return_code = &execute;
+        if($return_code eq 1)
+        {
+            print "EXECUTE OK : $return_code\n";
+        }
+        else
+        {
+            print "EXECUTE ERROR : $return_code\n";
+        }    
+    }
+
+} 
+
+sub usage {
+    print "Usage:\t./".APPNAME." [-c kovan_conf_file] [--mail mail_address] [--snmp snmp_community]
+                      [--install|--configure|--execute]
+Options : 
+\t-c kovan_conf_file                 : kovan configuration file
+\t--snmp snmp_community              : snmp community name
+\t--mail mail_address                : mail address of nagios user
+\t--install                          : checks for files and copy them for configuring
+\t--configure                        : executes regex on files and configures them
+\t--execute                          : runs the binary\n";
+exit -1;
+}

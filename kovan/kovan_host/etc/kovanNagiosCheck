@@ -1,0 +1,131 @@
+#! /usr/local/bin/perl -w
+
+
+use strict;
+use Getopt::Long;
+use vars qw($opt_V $opt_h $opt_H $opt_C $opt_p $opt_Ping $PROGNAME);
+use lib "/usr/local/libexec/nagios" ;
+use utils qw(%ERRORS &print_revision &support &usage);
+
+$PROGNAME = "check_kovan";
+
+sub print_help ();
+sub print_usage ();
+
+$ENV{'PATH'}='';
+$ENV{'BASH_ENV'}=''; 
+$ENV{'ENV'}='';
+
+Getopt::Long::Configure('bundling');
+GetOptions
+	("V"   => \$opt_V,    "version"     => \$opt_V,
+	 "h"   => \$opt_h,    "help"        => \$opt_h,
+	 "H=s" => \$opt_H,    "hostname=s"  => \$opt_H,
+	 "C:s" => \$opt_C,    "community=s" => \$opt_C,
+         "p:s" => \$opt_p,    "procname=s"  => \$opt_p,
+         "P:s" => \$opt_Ping, "ping:s"   => \$opt_Ping);
+
+if ($opt_V) {
+	print_revision($PROGNAME,'1.4.14');
+	exit $ERRORS{'OK'};
+}
+
+#IPV6 Regular Expression
+#Prepares the ipv6 regex for hostname check.
+#
+#
+my $IPv4 = "((25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))";
+my $G = "[0-9a-fA-F]{1,4}";
+
+my @tail = ( ":",
+         "(:($G)?|$IPv4)",
+             ":($IPv4|$G(:$G)?|)",
+             "(:$IPv4|:$G(:$IPv4|(:$G){0,2})|:)",
+         "((:$G){0,2}(:$IPv4|(:$G){1,2})|:)",
+         "((:$G){0,3}(:$IPv4|(:$G){1,2})|:)",
+         "((:$G){0,4}(:$IPv4|(:$G){1,2})|:)" );
+
+our $IPv6_re = $G;
+$IPv6_re = "$G:($IPv6_re|$_)" for @tail;
+$IPv6_re = qq/:(:$G){0,5}((:$G){1,2}|:$IPv4)|$IPv6_re/;
+$IPv6_re =~ s/\(/(?:/g;
+$IPv6_re = qr/$IPv6_re/; 
+#
+#
+#IPV6 Regular Expression
+
+if ($opt_h) {print_help(); exit $ERRORS{'OK'};}
+
+my $host;
+if(!$opt_H)
+{
+    usage("Host name/address not specified\n");
+}
+elsif ($opt_H =~ m/$IPv6_re/)
+{
+    $host = $opt_H; 
+}
+else
+{
+    usage("Invalid host: $opt_H\n");
+}
+
+my $result;
+
+if(defined($opt_Ping))
+{
+    my $ping6  = "/sbin/ping6";
+    my $pingcount = "4";
+    if(system("$ping6 -c $pingcount $host ") eq 0)
+    {
+        exit $ERRORS{'OK'};
+    }
+    else
+    {
+        exit $ERRORS{'WARNING'};
+    }
+}
+
+($opt_p) || usage("Warning procname not specified\n");
+
+my $procname = $opt_p;
+my $snmpwalk = '/usr/local/bin/snmpwalk -v 2c';
+my $grep = '/usr/bin/grep';
+my $mibparameter = 'HOST-RESOURCES-MIB::hrSWRunName';
+
+($opt_C) || usage("Warning snmp community not specified\n");
+
+#check for running process
+if(system("$snmpwalk -c $opt_C udp6:'[$host]' $mibparameter | $grep $procname") eq 0)
+{
+    exit $ERRORS{'OK'};    
+}
+else
+{
+    exit $ERRORS{'WARNING'};
+}
+sub print_usage () {
+	print "Usage: $PROGNAME -H <host> [-C community] -w <warn> -c <crit>\n";
+}
+
+sub print_help () {
+	print_revision($PROGNAME,'1.4.14');
+	print "Copyright (c) 2000 Jeffrey Blank/Karl DeBisschop
+
+This plugin reports the signal strength of a Breezecom wireless equipment
+
+";
+	print_usage();
+	print "
+-H, --hostname=HOST
+   Name or IP address of host to check
+-C, --community=community
+   SNMPv1 community (default public)
+-w, --warning=INTEGER
+   Percentage strength below which a WARNING status will result
+-c, --critical=INTEGER
+   Percentage strength below which a CRITICAL status will result
+
+";
+	support();
+}

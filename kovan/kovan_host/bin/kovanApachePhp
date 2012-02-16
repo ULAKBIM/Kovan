@@ -1,0 +1,317 @@
+#!/usr/bin/perl   -w 
+use constant APPNAME  => "kovanApachePhp";
+use Tie::File;
+use File::Copy;
+use YAML::Tiny;
+use Getopt::Long;
+
+#globals
+my $monitor_host;
+my $kovan_dir;
+my $running_file;
+
+&read_args();
+
+sub install {
+
+	$apache_conf_file="$kovan_dir/monitor/usr/local/etc/apache22/httpd.conf" ;
+    $php_ini_file = "$kovan_dir/monitor/usr/local/etc/php.ini";
+
+    #check if httpd.conf exists
+    if( ! -e $apache_conf_file )
+    {
+		print "$apache_conf_file does not exists. Please find and copy an httpd.conf file to $kovan_dir/monitor/usr/local/etc\n";
+		return -1;
+    }
+    else
+	{
+        print "$apache_conf_file checked\n";
+	}
+    
+    if( -e $php_ini_file )
+    {
+        print "$php_ini_file checked\n";
+    }
+    else
+    {
+        if(system("cp $php_ini_file-production $php_ini_file") eq 0)
+        {
+            print "cp $php_ini_file -production $php_ini_file\n";
+        }
+        else
+        {
+            print "$php_ini_file-production file does not exists. Please find and copy a php.ini-production file to $kovan_dir/monitor/usr/local/etc";
+            return -1;
+        }
+    }
+
+}
+
+sub configure {
+	
+	$apache_conf_file="$kovan_dir/monitor/usr/local/etc/apache22/httpd.conf";
+	$hosts_file = "$kovan_dir/monitor/etc/hosts";
+    $php_ini_file = "$kovan_dir/monitor/usr/local/etc/php.ini";
+    
+    #check if httpd.conf exists
+	if (! -e $apache_conf_file)
+	{
+		print "$apache_conf_file file does not exist. Please find and copy a httpd.conf file.\n";
+		return -1;
+	}
+    else
+    {
+        print "$apache_conf_file checked\n";
+    }
+  
+
+    ###### HTTPD.CONF ######
+
+    #open and parse file in slurp mode for regex.
+    open FILE,  " < $apache_conf_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <FILE>;         # 'slurp' mode
+    $/ = $old;
+    #file for temporary output
+    open FILE2,  " > $apache_conf_file.temp" or die "can not open apache file.";
+	print "$apache_conf_file.temp file created\n"; 
+    ## Regex
+    $text = "Listen [::]:80";
+    if ($whole_file =~ m/##kvn_apache_s\s*Listen(.*?)\s*##kvn_apache_f/)
+    {
+        $whole_file =~ s/##kvn_apache_s\s*Listen(.*?)\s*##kvn_apache_f/##kvn_apache_s\n$text\n##kvn_apache_f/s;
+		print "regex : Listen checked\n";
+    }
+    elsif ($whole_file =~ m/Listen 80/)
+    {
+        $whole_file =~ s/Listen 80/##kvn_apache_s\n$text\n##kvn_apache_f/s;
+		print "regex : Listen defined\n";
+    }
+    $text = " index.html index.php nfsen.php";
+    if ($whole_file =~ m/##kvn_apache_s\s*DirectoryIndex(.*?)\s*##kvn_apache_f/) 
+    {
+        $whole_file =~ s/##kvn_apache_s\s*DirectoryIndex(.*?)\s*##kvn_apache_f/##kvn_apache_s\nDirectoryIndex $text\n##kvn_apache_f/s;
+		print "regex : DirectoryIndex checked\n";
+    }
+    elsif($whole_file =~ m/DirectoryIndex index.html/)
+    {
+        $whole_file =~ s/DirectoryIndex index.html/##kvn_apache_s\nDirectoryIndex $text\n##kvn_apache_f/;
+		print "regex : DirectoryIndex defined\n";
+    }
+    $text="\tAddType application/x-httpd-php .php\n\tAddType application/x-httpd-php-source .phps";
+    if($whole_file =~ m/##kvn_apache_s\s*AddType(.*?\s)##kvn_apache_f/sg)
+    {
+        $whole_file =~ s/(##kvn_apache_s)\s*AddType(.*?\s)(##kvn_apache_f)/$1\n$text\n$3/s;
+		print "regex : AddType checked\n";
+    }
+    elsif($whole_file =~ m/<IfModule mime_module>/ )
+    {
+        $whole_file =~ s/<IfModule mime_module>/<IfModule mime_module>\n##kvn_apache_s\n$text\n##kvn_apache_f/;
+		print "regex : AddType defined\n";
+    }
+    #print changes to httpd.conf
+    print FILE2 $whole_file;
+    close FILE2;
+    close FILE;
+    
+    #move temporary output file as http.conf
+    system("mv $apache_conf_file.temp $apache_conf_file");
+	print "mv $apache_conf_file.temp $apache_conf_file\n";
+    #get monitor_host ip from conf file
+    $monitor_ip = `jexec $monitor_host ifconfig | grep 'inet6 2001' | head -n 1| awk '{print \$2}'`;
+    chomp($monitor_ip);
+
+    ###### HOSTS  ######
+    #open and parse file in slurp mode for regex.
+	$hosts_ip_str = $monitor_ip . "\t" . $monitor_host;
+    open HOSTSFILE_IN,   " < $hosts_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $hosts_whole_file= <HOSTSFILE_IN>;         # 'slurp' mode
+    $/ = $old;
+    #file for temporary output
+    open HOSTSFILE_OUT,  " >> $hosts_file.temp" or die "can not open apache file.";
+	print "$hosts_file.temp file created\n";
+    #regex
+    if ($hosts_whole_file =~ m/(##kvn_apache_s\s*)(.*?)(##kvn_apache_f)/sg)
+    {
+        $hosts_whole_file =~ s/(##kvn_apache_s\s*)(.*?)(##kvn_apache_f)/$1$hosts_ip_str\n$3/sg;
+        print HOSTSFILE_OUT $hosts_whole_file;
+		print "regex : $hosts_ip_str checked\n";
+    }
+    else
+    {
+        print HOSTSFILE_OUT $hosts_whole_file;
+        print HOSTSFILE_OUT "##kvn_apache_s\n" . $hosts_ip_str . "\n##kvn_apache_f";
+		print "regex : $hosts_ip_str defined\n";
+    }
+    close(HOSTSFILE_OUT);
+    close(HOSTSFILE_IN);
+
+    ##move temporary output file as hosts file
+    system("mv $hosts_file.temp $hosts_file");
+	print "mv $hosts_file.temp $hosts_file\n";
+
+    ###### PHP.INI  ######
+    #open and parse file in slurp mode for regex.
+    open PHP_IN,   " < $php_ini_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $php_whole_file= <PHP_IN>;         # 'slurp' mode
+    $/ = $old;
+    #file for temporary output
+    open PHP_OUT,  " >> $php_ini_file.temp" or die "can not open apache file.";
+    print "$php_ini_file.temp file created\n"; 
+    $php_str = "date.timezone=''";
+    #regex
+    if ($php_whole_file =~ m/##kvn_apache_s\s*(.*?\s)##kvn_apache_f/)
+    {
+        $php_whole_file =~ s/(##kvn_apache_s)\s*(.*?\s)\s*(##kvn_apache_f)/$1\n$php_str\n$3/s;
+		print "regex : date.timezone checked\n";
+    }
+    else
+    {
+        $php_whole_file =~ s/;date.timezone =/##kvn_apache_s\n$php_str\n##kvn_apache_f/;
+		print "regex : date.timezone defined\n";
+    }
+    print PHP_OUT $php_whole_file;
+    close(PHP_OUT);
+    close(PHP_IN);
+
+    ##move temporary output file as hosts file
+    system("mv $php_ini_file.temp $php_ini_file");
+	print "mv $php_ini_file.temp $php_ini_file\n";
+    return 1;
+}
+
+sub execute 
+{
+    $apache = "/usr/local/etc/rc.d/apache22 ";
+	#check if apache already running
+    if(system("jexec $monitor_host csh -c \"$apache onestatus\"") ne 0)
+    {
+        if (system("jexec $monitor_host csh -c \"$apache onestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    else
+    {
+        if (system("jexec $monitor_host csh -c \"$apache onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    return 1;	
+}
+
+sub read_args{
+
+   # Arguments
+    my $result = Getopt::Long::GetOptions(
+			"c=s"		    => \$conf_file,
+            "install"       => \$install,
+            "configure"     => \$configure,
+            "execute"       => \$execute,
+    );
+
+	if( $ARGV[0] )
+    {
+        printf(STDERR "Unrecognized options\nType ".APPNAME." --help for usage.\n");
+        exit -1;
+    }
+
+	if( !(defined($install) or defined($configure) or defined($execute)) )
+    {
+        print "Please give at least one of the parameters from [--install|--configure|--execute]\n";
+        &usage();
+    }
+
+    #check for files.
+	if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else
+    {
+        printf(STDERR "Configuration file must be given\n");
+        &usage();
+    }		
+   
+	#assign global kovan_dir and monitor_host variables here
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+    $kovan_dir = $yaml->[0]->{kovan_dir};
+	$running_file = $kovan_dir . "/topology.tmp";	
+	
+	if( !(-e $running_file) )
+	{
+		print "Kovan is not running!\nPlease execute kovan before using the scripts.\n";
+		&usage();
+	}
+    
+	foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if($dev->{type} eq "monitor")
+        {
+            $monitor_host = $dev->{name};
+        }
+    }
+    #return_code for error checking
+    my $return_code;
+    if( defined($install))
+    {
+        $return_code = &install;
+		if($return_code eq 1)
+		{
+			print "INSTALL OK : $return_code\n";
+		}
+		else
+		{
+			print "INSTALL ERROR : $return_code\n";
+		}
+    }
+
+    if( defined($configure))
+    {
+        $return_code = &configure;
+		if($return_code eq 1)
+        {
+            print "CONFIGURE OK : $return_code\n";
+        }
+        else
+        {
+            print "CONFIGURE ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($execute))
+    {
+        $return_code = &execute;
+        if($return_code eq 1)
+        {
+            print "EXECUTE OK : $return_code\n";
+        }
+        else
+        {
+            print "EXECUTE ERROR : $return_code\n";
+        }    
+    }
+}
+
+#Show optional parameters
+sub usage {
+    print "\nUSAGE:\t".APPNAME." -c kovan_conf_file [--install|--configure|--execute] \n";
+    print "\t -c kovan_conf_file      : kovan configuration file\n";
+    print "\t --install               : checks for files and copy them for configuring\n" ;
+    print "\t --configure             : executes regex on files and configures them\n";
+    print "\t --execute               : runs the binary\n";
+	exit 1;
+}

@@ -1,0 +1,84 @@
+## MRTG Configuration Template to create PPS (Packet Per Second) graphs.
+##
+## Syntax: 
+##
+#  /opt/mrtg/bin/cfgmaker --if-template=/opt/mrtg/etc/pps.template \
+if(not $problem_lines)
+{
+  $target_lines .= <<ECHO;
+
+Target[$target_name]: .1.3.6.1.2.1.2.2.1.11.$if_index&.1.3.6.1.2.1.2.2.1.17.$if_index:$router_connect
+SetEnv[$target_name]: MRTG_INT_IP="$if_ip" MRTG_INT_DESCR="$if_snmp_descr"
+ECHO
+
+  if ($directory_name) {
+      $target_lines .= "Directory[$target_name]: $directory_name\n";
+  }
+
+  $target_lines .= <<ECHO;
+YLegend[$target_name]: packets per/sec
+ShortLegend[$target_name]: p/s
+Legend1[$target_name]: Avg Input Unicast Packets
+Legend2[$target_name]: Avg Output Unicast Packets
+Legend3[$target_name]: Maximal Input Unicast Packets
+Legend4[$target_name]: Maximal Output Unicast Packets
+LegendI[$target_name]: &nbsp;ifInUcastPkts:&nbsp;
+LegendO[$target_name]: &nbsp;IfOutUcastPkts:&nbsp;
+MaxBytes[$target_name]: 100000000
+Title[$target_name]: $html_desc_prefix$html_if_title_desc -- $sysname
+PageTop[$target_name]: <h1>$html_desc_prefix$html_if_title_desc -- $sysname</h1>
+               <div id="sysdetails">
+                       <table>
+                               <tr>
+                                       <td>System:</td>
+                                       <td>$sysname in $html_syslocation</td>
+                               </tr>
+                               <tr>
+                                       <td>Maintainer:</td>
+                                       <td>$html_syscontact</td>
+                               </tr>
+                               <tr>
+                                       <td>Description:</td>
+                                       <td>$html_if_description</td>
+                               </tr>
+                               <tr>
+                                       <td>ifType:</td>
+                                       <td>$html_if_type_desc ($if_type_num)</td>
+                               </tr>
+                               <tr>
+                                       <td>ifName:</td>
+                                       <td>$html_if_snmp_name</td>
+                               </tr>
+ECHO
+
+  $target_lines .= <<ECHO if defined $if_port_name;
+                               <tr>
+                                       <td>Port Name:</td>
+                                       <td>$if_port_name</td>
+                               </tr>
+ECHO
+
+  $target_lines .= <<ECHO;
+                               <tr>
+                                       <td>Max Speed:</td>
+                                       <td>100000000</td>
+                               </tr>
+ECHO
+
+  $target_lines .= <<ECHO if $if_ip;
+                               <tr>
+                                       <td>Ip:</td>
+                                       <td>$if_ip ($if_dns_name)</td>
+                               </tr>
+ECHO
+
+  $target_lines .= <<ECHO;
+                       </table>
+               </div>
+ECHO
+} else {
+  $head_lines="";
+  $problem_lines="";
+  $target_lines="";
+  $separator_lines="";
+}

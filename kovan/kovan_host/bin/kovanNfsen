@@ -1,0 +1,440 @@
+#!/usr/bin/perl -w
+use constant APPNAME  => "kovanNfsen";
+use YAML::Tiny;
+use Getopt::Long;
+
+my $conf_file;
+my $apache_conf_file = "/usr/local/etc/apache22/httpd.conf";
+my $kovan_dir;
+my $jailroot;
+my $monitor_host;
+my $running_file;
+
+#nfsen variables
+my $nfsen_start_range;
+my $nfsen_binary = "/usr/local/bin/nfsen";
+my $nfsen_distfile = "/usr/local/etc/nfsen-dist.conf";
+my $nfsen_conf_dir = "/usr/local/etc";
+my $subdirlayout = 7;
+my $user = "www";
+my $www_user = "www";
+my $www_group = "www";
+
+&read_args();
+
+sub install {
+
+    my $nfsen_web_dir = "/usr/local/www/nfsen";
+  
+    #check for httpd.conf file 
+    if( !(-e $jailroot . $apache_conf_file) )
+    {
+        print "$jailroot$apache_conf_file does not exists. Please find and copy an httpd.conf file to $jailroot$apache_conf_file\n";
+        return -1;
+    }
+    ## Push commands to the array
+    my @result_cmds;
+    if(-e $jailroot . "$nfsen_conf_dir/nfsen.conf")
+    {
+        push (@result_cmds, "rm -f $jailroot$nfsen_conf_dir/nfsen.conf");
+    }
+    push(@result_cmds, "cp $jailroot$nfsen_distfile  $jailroot$nfsen_conf_dir/nfsen.conf");
+    #execute commands
+    foreach (@result_cmds)
+    {
+        print "$_\n";
+        if(system($_) ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+
+    }
+
+    #### For state reset
+    print "State reconfig ....\n";
+    system("jexec $monitor_host csh -c \"yes | nfsen reconfig\"");
+    return 1;
+}
+
+sub configure { 
+    
+    my $h_nodes = {};
+    my @nodes;
+    
+    #we need an ordered array @nodes
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if( ($dev->{type} eq "router" or $dev->{type} eq "blackhole") and $dev->{name} ne "localhost")
+        {
+            $h_nodes->{$dev->{name}}->{interfaces} = ();
+            push (@nodes, $dev->{name});
+        }
+    }
+
+    #create an interfaces array in $h_nodes->{$router} hash for each router, and assign the interface names.
+    foreach $router (keys %{$h_nodes})
+    {
+        $i=0;
+        foreach $con (@{$conns})
+        {
+            $peers = $con->{peers};
+            foreach $peer( @{$peers} )
+            {
+                if($router eq $peer->{name})
+                {
+                    $h_nodes->{$router}->{interfaces}[$i]="eth$i";
+                    $i++;
+                }
+            }
+        }
+    }
+
+    $portrange=$nfsen_start_range;
+    $i=0;
+    $j=0;
+
+    #Prepare the sources_list
+    my $sources_list = "\n";
+    foreach $name (@nodes)
+    {
+        $size = scalar @{$h_nodes->{$name}->{interfaces}}. "\n";
+        while($i < $size) 
+        {
+            $colour = &color();
+            $sources_list .="\t'" . $name ."_".$h_nodes->{$name}->{interfaces}[$i]."'\t=> {'port'=> '".$portrange."', 'col' => '". $colour ."', 'optarg' => '-6'},\n";
+
+            $i++;
+            $j++;
+            $portrange++;  
+        }
+        $i=0;
+    }
+
+    #open and parse file in slurp mode for regex. 
+    open FILE,   "< $jailroot$nfsen_conf_dir/nfsen.conf" or die "can not open nfsen.conf file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <FILE>;
+    $/ = $old;
+    #file for temporary output
+    open FILE2,  " >  $jailroot$nfsen_conf_dir/nfsen.conf.temp " or die $!;
+	print "$nfsen_conf_dir/nfsen.conf.temp file created\n";
+    #Regex
+    if( $whole_file =~ m/(##kvn_nfsen_s\s*)(%sources\s*=\s*\()(.*?)(##kvn_nfsen_f)/sg)
+    {
+        $whole_file =~ s/(##kvn_nfsen_s\s*)(%sources\s*=\s*\()(.*?)(\);)(##kvn_nfsen_f)/$1$2$sources_list$4$5/sg;
+		print "regex : %sources checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/(%sources\s*=\s*\()(.*?)(\);)/##kvn_nfsen_s\n$1 $sources_list $3\n##kvn_nfsen_f/s;
+		print "regex : %sources defined\n";
+    }
+  
+    if( $whole_file =~ m/(##kvn_nfsen_s\s*)(\$USER)(.*?)(##kvn_nfsen_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nfsen_s\s*)(\$USER)(.*?)(\s*##kvn_nfsen_f)/$1\$USER=\"$user\";$4/s;
+		print "regex : USER checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/\$USER(.*?)\;/##kvn_nfsen_s\n\$USER=\"$user\";\n##kvn_nfsen_f/s;
+		print "regex : USER defined\n";
+    }
+   
+    if( $whole_file =~ m/(##kvn_nfsen_s\s*)(\$WWWUSER)(.*?)(##kvn_nfsen_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nfsen_s\s*)(\$WWWUSER)(.*?)(\s*##kvn_nfsen_f)/$1\$WWWUSER=\"$www_user\";$4\n/s;
+		print "regex : WWWUSER checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/\$WWWUSER(.*?)\;/##kvn_nfsen_s\n\$WWWUSER=\"$www_user\";\n##kvn_nfsen_f\n/s;
+		print "regex : WWWUSER defined\n";
+    }
+    
+    if( $whole_file =~ m/(##kvn_nfsen_s\s*)(\$WWWGROUP)(.*?)(##kvn_nfsen_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nfsen_s\s*)(\$WWWGROUP)(.*?)(\s*##kvn_nfsen_f)/$1\$WWWGROUP=\"$www_group\";$4\n/s;
+		print "regex : WWWGROUP checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/\$WWWGROUP\s=(.*?)\;/##kvn_nfsen_s\n\$WWWGROUP=\"$www_group\";\n##kvn_nfsen_f\n/s;
+		print "regex : WWWGROUP defined\n";
+    }
+
+    if( $whole_file =~ m/(##kvn_nfsen_s\s*)(\$SUBDIRLAYOUT)(.*?)(##kvn_nfsen_f)/s)
+    {
+        $whole_file =~ s/(##kvn_nfsen_s\s*)(\$SUBDIRLAYOUT)(.*?)(\s*##kvn_nfsen_f)/$1\$SUBDIRLAYOUT=\"$subdirlayout\";$4/s;
+		print "regex : SUBDIRLAYOUT checked\n";
+    }
+    else
+    {
+        $whole_file =~ s/\$SUBDIRLAYOUT(.*?)\;/##kvn_nfsen_s\n\$SUBDIRLAYOUT=\"$subdirlayout\";\n##kvn_nfsen_f/s;
+		print "regex : SUBDIRLAYOUT defined\n";
+    } 
+
+    print FILE2 $whole_file;
+    close FILE2;
+    close FILE;
+   
+    if(system("mv $jailroot$nfsen_conf_dir/nfsen.conf.temp $jailroot$nfsen_conf_dir/nfsen.conf") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    print "mv $jailroot$nfsen_conf_dir/nfsen.conf.temp $jailroot$nfsen_conf_dir/nfsen.conf\n"; 
+    #open and parse file in slurp mode for regex.
+    open APACHE_IN,   " < $jailroot$apache_conf_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $apache_whole_file= <APACHE_IN>;         
+    $/ = $old;
+    #file for temporary output
+    open APACHE_OUT,  " >> $jailroot$apache_conf_file.temp" or die "can not open apache file."; 
+	print "$jailroot$apache_conf_file.temp file created\n";
+    @nfsen_apache_conf =
+   "
+    <Directory /usr/local/www/nfsen>
+    Options Indexes FollowSymLinks MultiViews
+    AllowOverride AuthConfig
+    Order allow,deny
+    allow from all
+
+    </Directory>
+
+    Alias /nfsen /usr/local/www/nfsen\n" ;
+
+    #regex
+    if( $apache_whole_file =~ m/(##kvn_nfsen_s\s*)(<Directory)(.*?)(##kvn_nfsen_f)/s)
+    {
+        $apache_whole_file =~ s/(##kvn_nfsen_s\s*)(<Directory)(.*?)(##kvn_nfsen_f)/$1@nfsen_apache_conf$4/s;
+        print APACHE_OUT $apache_whole_file;
+		print "regex : <Directory> checked\n";
+    }
+    else
+    {
+        print APACHE_OUT $apache_whole_file;
+        print APACHE_OUT "##kvn_nfsen_s@nfsen_apache_conf##kvn_nfsen_f";
+		print "regex : <Directory> defined\n";
+    } 
+    close APACHE_OUT;
+    close APACHE_IN;
+   
+    if(system("mv $jailroot$apache_conf_file.temp $jailroot$apache_conf_file") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+	print "mv $jailroot$apache_conf_file.temp $jailroot$apache_conf_file\n";
+    return 1;
+}
+
+sub execute
+{
+	#check if nfsen is already running
+    system("jexec $monitor_host csh -c \"yes | nfsen reconfig\"");
+    if(system("jexec $monitor_host csh -c \"nfsen start\"") ne 0)
+    {
+        print "command not executed\n";
+        return -1;
+    }
+
+	#check if apache already running
+    if(system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestatus\"") ne 0)
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    else
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+
+    return 1;
+}
+
+#reading arguments and check for errors
+sub read_args
+{
+    # Arguments
+    my $result = Getopt::Long::GetOptions(
+        "c=s"               => \$conf_file,
+        "help"              => \$help,
+        "subdirlayout:s"	=> \$subdirlayout,
+        "user:s"			=> \$user,
+        "www-user:s"		=> \$www_user,
+        "www-group:s"		=> \$www_group,
+        "install"           => \$install,
+        "configure"         => \$configure,
+        "execute"           => \$execute,
+    );
+   
+    if(defined($help))
+    {
+        &usage();
+    } 
+
+    if( $ARGV[0] )
+    {
+        printf(STDERR "Unrecognized options\nType ".APPNAME." --help for usage.\n");
+        exit -1; 
+    }
+
+    if( !(defined($install) or defined($configure) or defined($execute)) )
+    {
+        print "Please give at least one of the parameters from [--install|--configure|--execute]\n";
+        &usage();
+    }
+
+    if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else
+    {
+        printf(STDERR "Configuration or reference file must be given\n");
+        &usage();
+    }
+
+    #parse file
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+    $conns = $yaml->[0]->{connections};
+    $kovan_dir = $yaml->[0]->{kovan_dir};
+
+	$running_file = $kovan_dir . "/topology.tmp";
+    if( !(-e $running_file) )
+    {
+        print "Kovan is not running!\nPlease execute kovan before using the scripts.\n";
+        &usage();
+    }
+
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if($dev->{type} eq "monitor")
+        {
+            $nfsen_start_range = $dev->{nfsen_start_port};
+            $monitor_host = $dev->{name};
+        }
+    }
+
+    $jailroot = "$kovan_dir/monitor";
+
+
+    #return_code for error checking
+    my $return_code;
+    if( defined($install) )
+    {
+        $return_code = &install;
+        if($return_code eq 1)
+        {
+            print "INSTALL OK : $return_code\n";
+        }
+        else
+        {
+            print "INSTALL ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($configure))
+    {
+        #set the parameters given
+        if( defined($subdirlayout))
+        {
+            if( $subdirlayout > 9  )
+            {
+                printf(STDERR "subdirlayout must be between 0 - 9 \n");
+                &usage();
+            }
+        }
+        else
+        {
+            printf(STDERR "subdirlayout parameter must be given\n");
+            &usage();
+        }
+        #execute configure
+        $return_code = &configure;
+        if($return_code eq 1)
+        {
+             print "CONFIGURE OK : $return_code\n";
+        }
+        else
+        {
+             print "CONFIGURE ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($execute))
+    {
+        $return_code = &execute;
+        if($return_code eq 1)
+        {
+            print "EXECUTE OK : $return_code\n";
+        }
+        else
+        {
+            print "EXECUTE ERROR : $return_code\n";
+        }
+    }
+
+}
+
+sub device_type {
+    my $node = shift;
+    foreach $dev ( @{$yaml->[0]->{devices}})
+    {
+        if( $dev->{name} eq $node){
+            return $dev->{type};
+        }
+    }
+}
+
+#random color generator
+sub color {
+    my ($rand,$x);
+    my @hex;
+    for ($x = 0; $x < 3; $x++) {
+        $rand = rand(255);
+        $hex[$x] = sprintf ("%x", $rand);
+        if ($rand < 9) {
+            $hex[$x] = "0" . $hex[$x];
+        }
+        if ($rand > 9 && $rand < 16) {
+            $hex[$x] = "0" . $hex[$x];
+        }
+    }
+    return "\#" . $hex[0] . $hex[1] . $hex[2];
+}
+
+#Show optional parameters
+sub usage {
+    print "Usage:\t./".APPNAME." [-c kovan_conf_file] [-s subdirectory] [-u nfsenuser]
+                      [--www-user web_user] [--www-group web_group]
+                      [--install|--configure|--execute]
+Options:
+\t -c kovan_conf_file                   : kovan configuration file
+\t -s subdirectory_value                : subdirectory value, between 1 <= s <= 9
+\t -u nfsen_user                        : name of the nfsen processes user
+\t --www-user web_user                  : name of the user that runs web process
+\t --www-group web_group                : name of the group that runs web process
+\t --install                            : checks for files and copy them for configuring
+\t --configure                          : executes regex on files and configures them
+\t --execute                            : runs the binary\n";
+exit -1;
+}
+
+

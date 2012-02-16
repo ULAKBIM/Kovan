@@ -1,0 +1,44 @@
+$ORIGIN .
+$TTL 60s	; 10 minutes
+83.140.193.in-addr.arpa	IN SOA	ns12.ulakbim.gov.tr. hostmaster.ulakbim.gov.tr. 2009082702 28800 7200 604800 600
+83.140.193.in-addr.arpa NS	ns1.ulakbim.gov.tr.
+83.140.193.in-addr.arpa NS	ns2.ulakbim.gov.tr.
+$ORIGIN 83.140.193.in-addr.arpa.
+243			PTR	ilkertemp.ulakbim.gov.tr.
+1			PTR	suzgec.ulakbim.gov.tr.
+3			PTR	kekeme.ulakbim.gov.tr.
+14			PTR	dondurma.ulakbim.gov.tr.
+10			PTR	eskidondurma.ulakbim.gov.tr.
+100			PTR	trrad01.ulakbim.gov.tr.
+101			PTR	torik.ulakbim.gov.tr.
+102			PTR	dergi.ulakbim.gov.tr.
+103			PTR	irmik.ulakbim.gov.tr.
+104			PTR	monitor.ulakbim.gov.tr.
+105			PTR	ambar.ulakbim.gov.tr.
+106			PTR	wiki.ulakbim.gov.tr.
+107			PTR	ulakrad.ulakbim.gov.tr.
+112			PTR	istatistik.ulakbim.gov.tr.
+11			PTR	lokum.ulakbim.gov.tr.
+97			PTR	baklava.ulakbim.gov.tr.
+115			PTR	kunduz.ulakbim.gov.tr.
+12			PTR	gullac.ulakbim.gov.tr.
+13			PTR	katmer.ulakbim.gov.tr.
+89			PTR	canan.ulakbim.gov.tr.
+99			PTR	servis.ulakbim.gov.tr.
+28			PTR	sutlac.ulakbim.gov.tr.
+138			PTR	akcakoca.ulakbim.gov.tr.
+150			PTR	digil.ulakbim.gov.tr.
+155			PTR	ltsp01.ulakbim.gov.tr.
+156			PTR	ltsp02.ulakbim.gov.tr.
+157			PTR	ltsp03.ulakbim.gov.tr.
+158			PTR	ltsp04.ulakbim.gov.tr.
+159			PTR	ltsp05.ulakbim.gov.tr.
+160			PTR	ltsp06.ulakbim.gov.tr.
+161			PTR	ltsp07.ulakbim.gov.tr.
+162			PTR	ltsp08.ulakbim.gov.tr.
+163			PTR	ltsp09.ulakbim.gov.tr.
+164			PTR	ltsp10.ulakbim.gov.tr.
+141			PTR	kadayif.ulakbim.gov.tr.
+168			PTR	javast26.ulakbim.gov.tr.
+169			PTR	javast27.ulakbim.gov.tr.
+170			PTR	javastsuha.ulakbim.gov.tr.

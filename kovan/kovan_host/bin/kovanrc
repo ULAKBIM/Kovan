@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# PROVIDE: kovan
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+# Add the following lines to /etc/rc.conf to enable kovan:
+# kovan_enable : Set to YES to enable kovan (Default: NO)
+# kovan_conf:  Kovan conf file (Default : /usr/local/kovan/etc/kovanDefault.conf ) 
+#
+
+. /etc/rc.subr
+
+name="kovan"
+rcvar=`set_rcvar`
+load_rc_config $name
+
+[ -z "$kovan_enable" ]    && kovan_enable="NO"
+[ -z "$kovan_conf" ]   && kovan_conf="PATH/etc/kovanDefault.conf"
+
+
+# If you change the current configuration file location, this does not work.
+# Please update the script according to the changes.
+command="PATH/bin/kovan"
+command_args="--conf ${kovan_conf}"
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+
+kovan_start()
+{
+    [ -f PATH/topology.tmp ] && echo "kovan is already running ( you have topology.tmp file ) && exit || echo "Starting Kovan"
+	
+    ${command} ${command_args} --execute
+}
+
+kovan_stop()
+{
+    [ -f PATH/topology.tmp ] && echo "Stopping Kovan" || echo "kovan is not running ( you don\'t have topology.tmp file )" || exit
+
+    ${command} ${command_args} --remove -execute
+}
+
+
+run_rc_command "$1"

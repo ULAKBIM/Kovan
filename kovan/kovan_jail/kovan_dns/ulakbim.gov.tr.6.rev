@@ -1,0 +1,11 @@
+$ORIGIN ulakbim.gov.tr.
+$TTL 1h
+0.0.0.0.2.1.0.0.8.9.a.0.1.0.0.2.ip6.arpa. IN SOA ns13.ulakbim.gov.tr. hostmaster.ulakbim.gov.tr. 2009082702 28800 7200 604800 600
+@ IN NS	ns1.ulak.net.tr.
+@ IN NS	ns2.ulak.net.tr.
+$ORIGIN 0.0.0.0.2.1.0.0.8.9.a.0.1.0.0.2.ip6.arpa.
+
+4.9.0.0.0.0.0.0.0.0.0.0.0.0.0.0	PTR tufan.ulak.net.tr.
+1.8.0.0.0.0.0.0.0.0.0.0.0.0.0.0	PTR tosun6.ulak.net.tr.
+9.3.0.0.0.0.0.0.0.0.0.0.0.0.0.0	PTR ghost6.ulak.net.tr.
+1.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0	PTR test6.ulak.net.tr.

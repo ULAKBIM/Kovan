@@ -1,0 +1,353 @@
+#!/usr/bin/perl -w
+use constant APPNAME  => "kovanMrtg";
+use YAML::Tiny;
+use Getopt::Long;
+
+my $conf_file;
+my $kovan_dir;
+my $mrtg_web_dir; 
+my $mrtg_conf_dir; 
+my $monitor_host;
+my $snmp_community_name = "public";
+my $pps_template_file="/etc/MrtgPpsTemplate.txt" ;
+my $apache_conf_file = "/usr/local/etc/apache22/httpd.conf";
+my $crontab = "/usr/local/kovan/etc/kovan.cron";
+my $running_file;
+
+&read_args();
+
+
+sub install {
+   
+    #check for httpd.conf file
+    if( !(-e $monitor_dir . $apache_conf_file) )
+    {
+        print "$monitor_dir/$apache_conf_file does not exists. Please find and copy an httpd.conf file to $monitor_dir/$apache_conf_file\n";
+        return -1;
+    }
+
+    $mrtg_web_dir = $monitor_dir . "/usr/local/www/mrtg";
+    $mrtg_conf_dir = $monitor_dir. "/usr/local/etc/mrtg";
+    $crontab = $monitor_dir.$crontab;
+ 
+    #checks for directories and files
+    if(-e $mrtg_conf_dir)
+    {
+        push (@result_cmds, "rm -rf $mrtg_conf_dir");
+    }
+    push (@result_cmds, "mkdir -p $mrtg_conf_dir");
+    if( !(-e $crontab) )
+    {
+        push (@result_cmds, "touch $crontab");
+    }
+    if(-e $mrtg_web_dir)
+    {
+        push (@result_cmds, "rm -rf $mrtg_web_dir");
+    }
+    push (@result_cmds, "mkdir -p $mrtg_web_dir");
+    push (@result_cmds, "mkdir -p $mrtg_web_dir/bandwidth");
+    push (@result_cmds, "mkdir -p $mrtg_web_dir/pps");
+    foreach (@result_cmds)
+    {
+        print "$_\n";
+        if(system($_) ne 0)
+        {
+            print "command not executed\n";
+            return -1;
+        }
+    }
+    return 1;
+}
+
+sub configure {
+    
+    #mrtg.conf 
+    my $mrtg_web_dir_jail = "/usr/local/www/mrtg";
+    my $mrtg_conf_dir_jail = "/usr/local/etc/mrtg";
+    my $configmaker = "/usr/local/bin/cfgmaker";
+    my $indexmaker = "/usr/local/bin/indexmaker";
+    #my $global_options = "  --global \\\"Options[_]: growright, bits\\\" --global \\\"WorkDir: $mrtg_web_dir_jail\\\" ";
+    my $global_options = "  --global \\\"Options[_]: growright, bits\\\"  ";
+    my $snmp_options=" ";
+    my $sed = " | sed 's/1250000/1250000000/g'  | sed 's/10.0 Mbits/1 Gbps/g' ";
+
+    %routerlist = ();
+
+    #create a hash for each router
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if(($dev->{type} eq "router" or $dev->{type} eq "blackhole") and $dev->{name} ne "localhost")
+        {
+            $routerlist{$dev->{name}} = "";
+        }
+    }
+
+    #get ip addresses of routers
+    for $router (keys %routerlist )
+      {
+          $router_ip = `jexec $router ifconfig | grep 'inet6 2001' | head -n 1| awk '{print \$2}'`;
+          chomp($router_ip);
+          $routerlist{$router} = $router_ip;
+      }
+
+    #prepare snmp_options string 
+    for $name ( keys %routerlist ) {
+        $snmp_options = $snmp_options . " \\\"$snmp_community_name@[$routerlist{$name}]\\\" ";
+    }
+   
+    ## Push commands to the array
+    my @result_cmds;
+    push (@result_cmds, "jexec $monitor_host csh -c \"$configmaker --enable-ipv6  --snmp-options=:::::2  $global_options --global WorkDir:$mrtg_web_dir_jail/bandwidth  $snmp_options  $sed  > $mrtg_conf_dir_jail/bandwidth.conf\"");
+    push (@result_cmds, "jexec $monitor_host csh -c \"$configmaker --enable-ipv6  --snmp-options=:::::2 --if-template=$pps_template_file  --global WorkDir:$mrtg_web_dir_jail/pps  $global_options  $snmp_options  > $mrtg_conf_dir_jail/pps.conf\"");
+
+    push (@result_cmds, "jexec $monitor_host csh -c \"$indexmaker --title \'Kovan MRTG Bandwidth Statistics\' $mrtg_conf_dir_jail/bandwidth.conf --output $mrtg_web_dir_jail/bandwidth/bandwidth.html\"");
+    push (@result_cmds, "jexec $monitor_host csh -c \"$indexmaker --title \'Kovan MRTG pps Statistics\'  $mrtg_conf_dir_jail/pps.conf --output $mrtg_web_dir_jail/pps/pps.html\"");
+    
+    #execute commands
+    foreach (@result_cmds)
+    {
+        print "$_\n";
+        if(system($_) ne 0)
+        {
+            print "command not executed\n";
+            return -1;
+        }
+    }
+   
+    $cron_string = "5,10,15,20,25,30,35,40,45,50,55  * * * *  /usr/local/bin/mrtg $mrtg_conf_dir_jail/bandwidth.conf\n5,10,15,20,25,30,35,40,45,50,55  * * * *  /usr/local/bin/mrtg $mrtg_conf_dir_jail/pps.conf";
+    $crontab = $monitor_dir . $crontab;
+    #open and parse file in slurp mode for regex.
+    open FILE,   " < $crontab " or die "can not open dist file.";
+    $old = $/;
+    undef $/;
+    $whole_file= <FILE>;
+    $/ = $old;
+    #file for temporary output
+    open FILE2,  " >> $crontab.temp " or die $!; 
+    print "$crontab.temp file created\n";
+
+    if( $whole_file =~ m/(##kvn_mrtg_s\s*)(5)(.*?)(##kvn_mrtg_f)/sg)
+    {
+        $whole_file =~ s/(##kvn_mrtg_s\s*)(5)(.*?)(##kvn_mrtg_f)/$1$cron_string\n$4/sg;
+        print FILE2 $whole_file;
+	print "regex : $cron_string checked\n";
+    }
+    else
+    {
+	print FILE2 $whole_file;
+        print FILE2 "\n##kvn_mrtg_s\n".$cron_string."\n##kvn_mrtg_f\n";
+	print "regex : $cron_string defined\n";
+    }
+    close(FILE2);
+    close(FILE);
+
+    #move temporary output file as hosts file
+    if(system("mv $crontab.temp $crontab") ne 0)
+    {
+       return -1; 
+    }
+	print "mv $crontab.temp $crontab\n";
+
+    #open and parse file in slurp mode for regex.
+    open APACHE_IN,   " < $monitor_dir/$apache_conf_file" or die "can not open apache file.";
+    $old = $/;
+    undef $/;
+    $apache_whole_file= <APACHE_IN>;
+    $/ = $old;
+    #file for temporary output
+    open APACHE_OUT,  " >> $monitor_dir/$apache_conf_file.temp" or die "can not open apache file.";
+    print "$monitor_dir/$apache_conf_file.temp file created\n";
+
+    @mrtg_apache_conf =
+	"	
+<Directory /usr/local/www/mrtg>
+	Options None
+	AllowOverride None
+	Order allow,deny
+	Allow from all
+</Directory>
+Alias /mrtg /usr/local/www/mrtg\n";
+
+	#regex
+    if( $apache_whole_file =~ m/(##kvn_mrtg_s\s*)(<Directory)(.*?)(##kvn_mrtg_f)/s)
+    {
+        $apache_whole_file =~ s/(##kvn__s\s*)(<Directory)(.*?)(##kvn_mrtg_f)/$1@mrtg_apache_conf$4/s;
+        print APACHE_OUT $apache_whole_file;
+        print "regex : <Directory> checked\n";
+    }
+    else
+    {
+        print APACHE_OUT $apache_whole_file;
+        print APACHE_OUT "\n##kvn_mrtg_s@mrtg_apache_conf##kvn_mrtg_f\n";
+        print "regex : <Directory> defined\n";
+    }
+    close APACHE_OUT;
+    close APACHE_IN;
+
+    if(system("mv $monitor_dir$apache_conf_file.temp $monitor_dir$apache_conf_file") ne 0)
+    {
+        print "command not finished\n";
+        return -1;
+    }
+    print "mv $monitor_dir$apache_conf_file.temp $monitor_dir$apache_conf_file\n";
+
+    return 1;
+}
+
+sub execute
+{
+    
+    #add file to crontab of root
+    if (system("jexec $monitor_host csh -c \"/usr/bin/crontab -u root $crontab\"") ne 0)
+    {
+        print "command not executed\n";
+        return -1;
+    }
+    else
+    {
+        print "/usr/bin/crontab -u root $crontab\n";
+    }
+
+    #check if apache already running
+    if(system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestatus\"") ne 0)
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+    else
+    {
+        if (system("jexec $monitor_host csh -c \"/usr/local/etc/rc.d/apache22 onerestart\"") ne 0)
+        {
+            print "command not finished\n";
+            return -1;
+        }
+    }
+
+	return 1;
+}
+
+#reading arguments and check for errors
+sub read_args{
+
+   # Arguments
+	my $result = Getopt::Long::GetOptions(
+	    "c=s" 	    => \$conf_file,
+            "help"          => \$help,
+	    "snmp:s"	    => \$snmp_community_name,
+            "install"       => \$install,
+            "configure"     => \$configure,
+            "execute"       => \$execute,
+	);
+
+    if(defined($help))
+    {
+        &usage();
+    }
+
+    if( $ARGV[0] )
+    {
+        printf(STDERR "Unrecognized options\nType ".APPNAME." --help for usage.\n");
+        exit -1;
+    }
+
+    if( !(defined($install) or defined($configure) or defined($execute)) )
+    {
+        print "Please give at least one of the parameters from [--install|--configure|--execute]\n";
+        &usage();
+    }
+	
+    if( defined($conf_file))
+    {
+        if( !(-e $conf_file) )
+        {
+            printf(STDERR "$conf_file can not be found\n");
+            &usage();
+        }
+    }
+    else{
+		printf(STDERR "Configuration file must be given\n");
+		&usage();
+    }
+
+    $yaml = YAML::Tiny->new;
+    $yaml = YAML::Tiny->read($conf_file);
+    
+    #kovan_dir
+	$jail_roots = $yaml->[0]->{jail_roots};
+    $kovan_dir = $yaml->[0]->{kovan_dir};
+	$monitor_dir = $jail_roots->{monitor};
+
+	$running_file = $kovan_dir . "/topology.tmp";
+    if( !(-e $running_file) )
+    {
+        print "Kovan is not running!\nPlease execute kovan before using the scripts.\n";
+        &usage();
+    }
+
+    #monitor_host
+    foreach $dev (@{$yaml->[0]->{devices}})
+    {
+        if($dev->{type} eq "monitor")
+        {
+            $monitor_host = $dev->{name};
+        }
+    }
+    
+    #return_code for error checking
+    my $return_code;
+
+    if( defined($install))
+    {
+        $return_code = &install;
+        if($return_code eq 1)
+        {
+			print "INSTALL OK : $return_code\n";
+        }
+        else
+        {
+			print "INSTALL ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($configure))
+    {
+        $return_code = &configure;
+        if($return_code eq 1)
+        {
+			print "CONFIGURE OK : $return_code\n";
+        }
+        else
+        {
+			print "CONFIGURE ERROR : $return_code\n";
+        }
+    }
+
+    if( defined($execute))
+    {
+        $return_code = &execute;
+        if($return_code eq 1)
+        {
+			print "EXECUTE OK : $return_code\n";
+        }
+        else
+        {
+			print "EXECUTE ERROR : $return_code\n";
+        }
+    }
+}
+
+#Show optional parameters
+sub usage {
+    print "Usage:\t./".APPNAME." [-c kovan_conf_file] [--snmp snmp_community]
+                    [--install|--configure|--execute]
+Options :
+\t-c kovan_conf_file                 : kovan configuration file
+\t--snmp snmp_community              : snmp community name
+\t--install                          : checks for files and copy them for configuring
+\t--configure                        : executes regex on files and configures them
+\t--execute                          : runs the binary\n";
+exit -1;
+}

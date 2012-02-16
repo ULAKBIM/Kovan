@@ -1,0 +1,215 @@
+#!/usr/bin/perl -w
+
+use constant APPNAME  => "kovanManageLinks";
+use YAML::Tiny;
+use Getopt::Long;
+
+
+&read_args();
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  ????
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub usage {
+    print "usage:\t".APPNAME." --all [--show]\n";
+    print "      \t".APPNAME." --show link_name\n";
+    print "      \t".APPNAME." --reset link_name\n";
+    print "      \t".APPNAME." --delay=X(s|ms|us) --bandwidth=Y(gbps|mbps|kbps|bps) --upstream_ber=Z --downstream_ber=T link_name\n";
+}
+#===  FUNCTION  ================================================================
+#         NAME:  read_args
+#      PURPOSE:  
+#   PARAMETERS:  ????
+#      RETURNS:  ????
+#  DESCRIPTION:  
+#       THROWS:  no exceptions
+#     COMMENTS:  none
+#     SEE ALSO:  n/a
+#===============================================================================
+sub read_args{
+
+    my $conf_file_pointer;
+    my $link;
+    my $list;
+    my $show;
+    my $res;
+    my $delay;
+    my $bandwidth;
+    my $upstream_ber;
+    my $downstream_ber;
+    my $set_mode;
+    my $set_body;
+    my $reset;
+    
+    my $result = Getopt::Long::GetOptions(
+            "all" => \$list,
+            "show_details" => \$show,
+            "delay=s" => \$delay,
+            "bandwidth=s" => \$bandwidth,
+            "upstream_ber=i" => \$upstream_ber,
+            "downstream_ber=i" => \$downstream_ber,
+            "reset" => \$reset
+            );
+   
+    $set_mode = 0;
+    $set_mode = defined($delay) || defined($bandwidth) || defined($upstream_ber) || defined($downstream_ber);
+   
+    if( ($set_mode && (defined($list) || defined($show) || !$ARGV[0] || defined($reset))) 
+        || (defined($reset) && (defined($list) || defined($show))) 
+        || (defined($reset) && !$ARGV[0] ) ){
+        &usage();
+        exit -1;
+    }
+
+    if( $ARGV[0] ){
+        $res = `ngctl l | grep $ARGV[0] | wc -l`;
+        if( $res == 0){
+            print "Link \"$ARGV[0]\" does not exist\n";
+            exit -1; 
+        }
+    }
+
+    if( defined($reset)){
+        $res = `ngctl msg $ARGV[0]: setcfg { bandwidth=-1 delay=-1 upstream={ BER=-1 } downstream={ BER=-1} }`;
+        $res = `ngctl msg $ARGV[0]: getcfg | tail -1`;
+        print_values("$ARGV[0]:".$res);
+        exit -1;
+    }
+
+    my $metric;
+    if( $set_mode ){
+        $set_body = "";
+        if( defined($delay)){
+            if($delay =~ m/^(\d+)(s|ms|us)$/i){
+                $metric = lc($2);
+                if( $metric eq "s" ){
+                    $delay = $1 * 1000000;
+                }elsif( $metric eq "ms" ){
+                    $delay = $1 * 1000;
+                }elsif( $metric eq "us" ){
+                    $delay = $1 ;
+                }
+                $set_body .= " delay=$delay " ;
+            }else{
+                print "Error in input $delay\n";
+                exit -1;
+            }
+        }
+        if( defined($bandwidth)){
+            if($bandwidth =~ m/^(-?\d+)(mbps|gbps|bps|kbps)$/i){
+                $metric = lc($2);
+                if( $metric eq "gbps" ){
+                    $bandwidth = $1 * 1000000000;
+                }elsif( $metric eq "mbps" ){
+                    $bandwidth = $1 * 1000000;
+                }elsif( $metric eq "kbps" ){
+                    $bandwidth = $1 * 1000;
+                }elsif( $metric eq "bps" ){
+                    $bandwidth = $1;
+                }
+                $set_body .= " bandwidth=$bandwidth " ;
+            }else{
+                print "Error in input $bandwidth\n";
+                exit -1;
+            }
+        }
+        if( defined($upstream_ber)){
+            $set_body .= " upstream={BER=$upstream_ber} " ;
+        }
+        if( defined($downstream_ber)){
+            $set_body .= " downstream={BER=$downstream_ber} " ;
+        }
+    
+        $res = `ngctl msg $ARGV[0]: setcfg { $set_body }`;
+        $res = `ngctl msg $ARGV[0]: getcfg | tail -1`;
+        print_values("$ARGV[0]:".$res);
+        exit -1;
+
+    }
+
+    if( defined($list) && !defined($show) ){
+        $res= `ngctl l | grep \"Type: pipe\" | awk '{print \$2}'`;
+        print $res;
+        exit -1;
+    }
+
+    if( defined($list) && $ARGV[0] ){
+        &usage();
+        exit -1;
+    }
+
+    if( defined($show) && $ARGV[0] ){
+        $res= `ngctl msg $ARGV[0]: getcfg| tail -1`;
+        print_values("$ARGV[0]:".$res);
+        exit -1;
+    }
+  
+    my @lines; 
+    if( defined($list) && defined($show)){
+        $res= `ngctl l | grep \"Type: pipe\" | awk '{print \$2}' | xargs -I {} sh -c \"echo -n {}:; ngctl msg {}: getcfg| tail -1\"`;
+        @lines = split( /\n/, $res);
+        foreach (@lines){
+            print_values($_);
+        }
+        exit -1;
+    } 
+
+    &usage();
+}
+
+sub print_values{
+    my $conf_line = shift;
+    my $link;
+    my $delay = "default";
+    my $bandwidth = "default";
+    my $upstream_ber= "default";
+    my $downstream_ber= "default";
+    my $res = "|";
+
+    if( $conf_line =~ m/^(.*?):/ ){
+        $link = $1;
+    }
+    if( $conf_line =~ m/bandwidth=(\d+)/ ){
+        $bandwidth = $1;
+        if( $bandwidth >= 1000000000 ){
+           $bandwidth = ($bandwidth / 1000000000)."Gbps"
+        }elsif( $bandwidth >= 1000000 ){
+           $bandwidth = ($bandwidth / 1000000)."Mbps"
+        }elsif( $bandwidth >= 1000 ){
+           $bandwidth = ($bandwidth / 1000)."Kbps"
+        }else {
+           $bandwidth = $bandwidth."bps"
+        }
+    }
+    if( $conf_line =~ m/delay=(\d+)/ ){
+        $delay = $1;
+        if( $delay >= 1000000){
+            $delay = ($delay/1000) ."s";
+        }elsif( $delay >= 1000){
+            $delay = ($delay/1000) ."ms";
+        }else{
+            $delay = $1 ."us";
+        }
+    }
+    if( $conf_line =~ m/upstream={[^}]BER=(\d+) / ){
+        $upstream_ber = $1;
+    }
+    if( $conf_line =~ m/downstream={[^}]BER=(\d+) / ){
+        $downstream_ber = $1;
+    }
+    
+    $res  ="$link:\n";
+    $res .="   Bandwidth: $bandwidth\n";
+    $res .="   Delay: $delay\n";
+    $res .="   UpStream BER: $upstream_ber\n";
+    $res .="   DownStream BER: $downstream_ber\n\n";
+    printf $res;
+}

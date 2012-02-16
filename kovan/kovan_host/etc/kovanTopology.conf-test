@@ -1,0 +1,197 @@
+---
+physical_ether: re0
+kovan_dir: PATH
+
+jail_roots:
+ router: PATH/router
+ node: PATH/node
+ monitor: PATH/monitor
+
+
+devices:
+ - name: localhost
+   type: router
+   default_route: 
+    - "-inet6 -net 2001:a98:13:4000::/60 2001:a98:13:4000::2"
+    - "-inet -net 10.10.10.0/24 10.10.10.2"
+ - name: anarouter
+   type: router
+   distribute: 1
+   default_route: 
+    - "-inet6 default 2001:a98:13:4000::1"
+    - "-inet default 10.10.10.1"
+ - name: ituh
+   type: router
+   distribute: 0
+ - name: comuh
+   type: router
+   distribute: 0
+ - name: monitor_host
+   type: monitor
+   distribute: 0
+   default_route:
+    - "-inet6 default 2001:a98:13:4000::11"
+    - "-inet default 10.10.30.1"
+   nfsen_start_port: 9000
+ - name: comur1
+   type: router
+   distribute: 0
+ - name: cdep1
+   type: node
+   default_route:
+    - "-inet default 10.10.60.1"
+ - name: cdep2
+   type: node
+   default_route:
+    - "-inet default 10.10.60.1"
+ - name: yavuz
+   type: node
+   default_route:
+    - "-inet default 10.10.70.1"
+ - name: murat
+   type: node
+   default_route:
+    - "-inet default 10.10.70.1"
+ - name: onur
+   type: node
+   default_route:
+    - "-inet default 10.10.70.1"
+ - name: emre
+   type: node
+   default_route:
+    - "-inet default 10.10.70.1"
+
+connections:
+
+ - type: bridge 
+   peers:
+    - name: localhost 
+    - name: anarouter
+      ip_addresses:
+       - "inet6 2001:a98::16e prefixlen 125"
+ 
+ - type: direct
+   bandwidth: 10kbps
+   delay: 1us
+   peers:
+    - name: anarouter
+      ip_addresses:
+       - "inet6 2001:a98:13:4000::5 prefixlen 126"
+       - "inet 10.10.20.1/24"
+    - name: ituh
+      ip_addresses:
+       - "inet6 2001:a98:13:4000::6 prefixlen 126"
+       - "inet 10.10.20.2/24"
+
+ - type: direct
+   bandwidth: 10mbps
+   delay: 1ms
+   downstream_ber: 4 
+   peers:
+    - name: anarouter
+      ip_addresses: 
+       - "inet6 2001:a98:13:4000::11 prefixlen 126"
+       - "inet 10.10.30.1/24"
+    - name: monitor_host
+      ip_addresses:
+       - "inet6 2001:a98:13:4000::12 prefixlen 126"
+       - "inet 10.10.30.2/24"
+
+ - type: direct
+   bandwidth: 1gbps
+   delay: 1s
+   upstream_ber: 2
+   downstream_ber: 3
+   peers:
+    - name: ituh
+      ip_addresses: 
+       - "inet6 2001:a98:13:4000::9 prefixlen 126"
+       - "inet 10.10.40.1/24"
+    - name: comuh 
+      ip_addresses:
+       - "inet6 2001:a98:13:4000::a prefixlen 126"
+       - "inet 10.10.40.2/24"
+
+ - type: direct
+   peers:
+    - name: comuh
+      ip_addresses: 
+       - "inet6 2001:a98:13:4000::c prefixlen 126"
+       - "inet 10.10.50.2/24"
+    - name: comur1
+      ip_addresses: 
+       - "inet6 2001:a98:13:4000::d prefixlen 126"
+       - "inet 10.10.50.1/24"
+
+ - type: bridge
+   peers:
+    - name: comuh
+      ip_addresses: 
+       - "inet6 2001:a98:13:4003::1 prefixlen 64"
+       - "inet 10.10.60.1/24"
+      prefix: "2001:a98:13:4003::/64"
+    - name: cdep1
+      ip_addresses: 
+       - auto6
+       - "inet 10.10.60.2/24"
+    - name: cdep2
+      ip_addresses: 
+       - auto6
+       - "inet 10.10.60.3/24"
+
+ - type: bridge
+   peers:
+    - name: comur1
+      ip_addresses: 
+       - "inet6 2001:a98:13:4004::1 prefixlen 64"
+       - "inet 10.10.70.1/24"
+      prefix: "2001:a98:13:4004::/64"
+
+    - name: yavuz
+      ip_addresses: 
+       - "inet6 2001:a98:13:4004::200 prefixlen 64"
+       - "inet 10.10.70.2/24"
+
+    - name: emre
+      ip_addresses: 
+       - auto6
+       - "inet 10.10.70.3/24"
+
+    - name: murat
+      ip_addresses: 
+       - auto6
+       - "inet 10.10.70.4/24"
+
+    - name: onur
+      ip_addresses: 
+       - "inet6 2001:a98:13:4004::201 prefixlen 64"
+       - "inet 10.10.70.5/24"
+
+services:
+ - name: syslogd
+   node: monitor_host 
+   command: syslogd -P monitor.pid 
+ 
+ - name: syslogd
+   node: yavuz 
+   command: syslogd -P yavuz.pid 
+
+ - name: softflowd
+   node: all-routers
+   command: /usr/local/sbin/softflowd
+
+ - name: snmpd
+   node: all-routers
+   command: /usr/local/sbin/snmpd -c /etc/snmpd.conf udp6:161
+
+ - name: cron 
+   node: monitor_host
+   command: /etc/rc.d/cron onestart
+
+ - name: kovan_dns
+   node: yavuz
+   command: /usr/local/kovan/bin/kovan_dns -h {IP4} -p 53 -c /usr/local/kovan/etc/dns/named.conf  -d /usr/local/kovan/etc/dns.pid
+ 
+ - name: kovan_http
+   node: onur 
+   command: /usr/local/kovan/bin/kovan_http -h {IP6} -p 80 -w /usr/local/kovan/www/ -d /usr/local/kovan/etc/http.pid 
